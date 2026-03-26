@@ -54,6 +54,23 @@ discover_sendgrid_api_key() {
   return 1
 }
 
+ensure_secret_file() {
+  local file_path="$1"
+
+  mkdir -p "$(dirname "${file_path}")"
+  chmod 700 "$(dirname "${file_path}")"
+
+  if [[ ! -s "${file_path}" ]]; then
+    python3 - <<'PY' > "${file_path}"
+import secrets
+
+print(secrets.token_urlsafe(48))
+PY
+  fi
+
+  chmod 600 "${file_path}"
+}
+
 wait_for_rails() {
   local attempt
   for attempt in $(seq 1 90); do
@@ -70,6 +87,12 @@ wait_for_rails() {
 wait_for_rails
 
 sendgrid_api_key="$(discover_sendgrid_api_key || true)"
+docs_sync_service_email="${DOCS_SYNC_SERVICE_EMAIL:-docs-sync@support.prudai.com}"
+autoreply_service_email="${AUTOREPLY_SERVICE_EMAIL:-ai-agent@support.prudai.com}"
+autoreply_webhook_token_path="${ROOT_DIR}/secrets/autoreply-webhook.token"
+
+ensure_secret_file "${autoreply_webhook_token_path}"
+autoreply_webhook_bearer_token="$(<"${autoreply_webhook_token_path}")"
 
 if [[ -f "${logo_source_path}" ]]; then
   docker cp "${logo_source_path}" "$(docker compose ps -q zammad-railsserver):${logo_container_path}"
@@ -81,7 +104,9 @@ raw_output="$(
     -e LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
     -e KC_CLIENT_ID="${KC_CLIENT_ID}" \
     -e KC_REALM="${KC_REALM}" \
-    -e DOCS_SYNC_SERVICE_EMAIL="${DOCS_SYNC_SERVICE_EMAIL}" \
+    -e AUTOREPLY_SERVICE_EMAIL="${autoreply_service_email}" \
+    -e AUTOREPLY_WEBHOOK_BEARER_TOKEN="${autoreply_webhook_bearer_token}" \
+    -e DOCS_SYNC_SERVICE_EMAIL="${docs_sync_service_email}" \
     -e SENDGRID_API_KEY="${sendgrid_api_key}" \
     -e ZAMMAD_BOOTSTRAP_ADMIN_EMAIL="${ZAMMAD_BOOTSTRAP_ADMIN_EMAIL}" \
     -e ZAMMAD_FQDN="${ZAMMAD_FQDN}" \
@@ -130,11 +155,31 @@ def ensure_kb(title:, locale:, color_highlight:, color_header:, color_header_lin
   kb
 end
 
+def ensure_persistent_api_token(user:, name:, permissions: nil)
+  token = Token.where(action: 'api', user_id: user.id, persistent: true).find_by(name: name)
+  attributes = {
+    action:     'api',
+    persistent: true,
+    user_id:    user.id,
+    name:       name
+  }
+  attributes[:preferences] = { permission: permissions } if permissions.present?
+
+  if token.nil?
+    Token.create!(attributes)
+  else
+    token.update!(attributes.except(:action, :persistent, :user_id, :name))
+    token
+  end
+end
+
 fqdn = ENV.fetch('ZAMMAD_FQDN')
 realm = ENV.fetch('KC_REALM', 'prudai')
 client_id = ENV.fetch('KC_CLIENT_ID', 'zammad-support')
 litellm_master_key = ENV.fetch('LITELLM_MASTER_KEY')
 docs_sync_email = ENV.fetch('DOCS_SYNC_SERVICE_EMAIL')
+autoreply_email = ENV.fetch('AUTOREPLY_SERVICE_EMAIL')
+autoreply_webhook_bearer_token = ENV.fetch('AUTOREPLY_WEBHOOK_BEARER_TOKEN')
 bootstrap_admin_email = ENV.fetch('ZAMMAD_BOOTSTRAP_ADMIN_EMAIL')
 sendgrid_api_key = ENV.fetch('SENDGRID_API_KEY', '').strip
 
@@ -215,24 +260,29 @@ docs_sync_user.password = SecureRandom.urlsafe_base64(32) if docs_sync_user.new_
 docs_sync_user.roles = [admin_role]
 docs_sync_user.save!
 
-docs_sync_token = Token.where(action: 'api', user_id: docs_sync_user.id, persistent: true).find_by(name: 'docs-sync')
-if docs_sync_token.nil?
-  docs_sync_token = Token.create!(
-    action:     'api',
-    persistent: true,
-    user_id:    docs_sync_user.id,
-    name:       'docs-sync',
-    preferences: {
-      permission: ['knowledge_base.editor']
-    }
-  )
-else
-  docs_sync_token.update!(
-    preferences: {
-      permission: ['knowledge_base.editor']
-    }
-  )
-end
+docs_sync_token = ensure_persistent_api_token(
+  user:        docs_sync_user,
+  name:        'docs-sync',
+  permissions: ['knowledge_base.editor']
+)
+
+autoreply_user = User.find_or_initialize_by(email: autoreply_email)
+autoreply_user.login = autoreply_email
+autoreply_user.firstname = 'AI'
+autoreply_user.lastname = 'Agent'
+autoreply_user.active = true
+autoreply_user.created_by_id ||= 1
+autoreply_user.updated_by_id = 1
+autoreply_user.password = SecureRandom.urlsafe_base64(32) if autoreply_user.new_record?
+autoreply_user.roles = [admin_role, agent_role]
+autoreply_user.group_names_access_map = { users_group.name => 'full' }
+autoreply_user.save!
+
+autoreply_token = ensure_persistent_api_token(
+  user:        autoreply_user,
+  name:        'autoreply-agent',
+  permissions: autoreply_user.permissions.pluck(:name).uniq
+)
 
 staff_emails = [bootstrap_admin_email, 'haisma@prudai.com'].map(&:downcase).uniq
 staff_configured = []
@@ -288,14 +338,46 @@ ticket_trigger.perform = {
 }
 ticket_trigger.save!
 
+autoreply_webhook = Webhook.find_or_initialize_by(name: 'prudai bm25 docs autoreply')
+autoreply_webhook.active = true
+autoreply_webhook.endpoint = 'http://zammad-autoreply:8081/webhooks/zammad/new-ticket'
+autoreply_webhook.http_method = 'post'
+autoreply_webhook.ssl_verify = false
+autoreply_webhook.customized_payload = false
+autoreply_webhook.custom_payload = nil
+autoreply_webhook.bearer_token = autoreply_webhook_bearer_token
+autoreply_webhook.note = 'PrudAI BM25-grounded first-response automation for new support tickets.'
+autoreply_webhook.save!
+
+autoreply_trigger = Trigger.find_or_initialize_by(name: 'prudai ai first response on new tickets')
+autoreply_trigger.active = true
+autoreply_trigger.created_by_id ||= 1
+autoreply_trigger.updated_by_id = 1
+autoreply_trigger.condition = {
+  'ticket.action'    => { 'operator' => 'is', 'value' => 'create' },
+  'ticket.state_id'  => { 'operator' => 'is not', 'value' => 4 },
+  'article.type_id'  => { 'operator' => 'is', 'value' => [1, 5, 11] },
+  'article.sender_id'=> { 'operator' => 'is', 'value' => 2 }
+}
+autoreply_trigger.perform = {
+  'notification.webhook' => {
+    'webhook_id' => autoreply_webhook.id
+  }
+}
+autoreply_trigger.save!
+
 puts "__RESULT__#{JSON.generate(
   kb_nl_id: kb_nl.id,
   kb_en_id: kb_en.id,
   docs_sync_token: docs_sync_token.token,
+  autoreply_token: autoreply_token.token,
   docs_sync_email: docs_sync_user.email,
+  autoreply_email: autoreply_user.email,
   smtp_configured: smtp_configured,
   staff_configured: staff_configured,
-  ticket_trigger_id: ticket_trigger.id
+  ticket_trigger_id: ticket_trigger.id,
+  autoreply_trigger_id: autoreply_trigger.id,
+  autoreply_webhook_id: autoreply_webhook.id
 )}"
 RUBY
 )"
@@ -315,10 +397,14 @@ from pathlib import Path
 result = json.loads(os.environ["RESULT_JSON"])
 root = Path("/root/zammad")
 token_path = root / "secrets" / "docs-sync.token"
+autoreply_token_path = root / "secrets" / "autoreply.token"
 env_path = root / "docs-sync.env"
 
 token_path.write_text(result["docs_sync_token"] + "\n", encoding="utf-8")
 os.chmod(token_path, 0o600)
+
+autoreply_token_path.write_text(result["autoreply_token"] + "\n", encoding="utf-8")
+os.chmod(autoreply_token_path, 0o600)
 
 env_path.write_text(
     "\n".join(
@@ -335,5 +421,13 @@ env_path.write_text(
 )
 os.chmod(env_path, 0o600)
 
-print(json.dumps(result))
+sanitized = dict(result)
+sanitized.pop("docs_sync_token", None)
+sanitized.pop("autoreply_token", None)
+print(json.dumps(sanitized))
 PY
+
+if docker compose config --services | grep -qx 'zammad-autoreply'; then
+  echo "Recreating zammad-autoreply with fresh config..."
+  docker compose up -d --build --force-recreate zammad-autoreply
+fi
