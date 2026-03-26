@@ -5,9 +5,13 @@
   <meta name="viewport" content="width=device-width">
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="color-scheme" content="light" />
+  <% prudai_asset_version = ENV.fetch('PRUDAI_ASSET_VERSION', '20260326-5') %>
   <title><%= Setting.get('product_name') %></title>
-  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-  <% prudai_asset_version = ENV.fetch('PRUDAI_ASSET_VERSION', '20260326-3') %>
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
+  <link rel="shortcut icon" type="image/png" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
+  <link rel="apple-touch-icon" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
+  <meta name="theme-color" content="#345CF3" />
   <%= stylesheet_link_tag "#{path_to_stylesheet('application.css')}?v=#{prudai_asset_version}", :media => 'all' %>
   <%= stylesheet_link_tag "#{path_to_stylesheet('application-print.css')}?v=#{prudai_asset_version}", :media => 'print' %>
   <%= javascript_tag nonce: true do -%>

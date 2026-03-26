@@ -11,6 +11,49 @@ set +a
 logo_source_path="${ROOT_DIR}/docker/zammad-assets/prudai-logo.png"
 logo_container_path="/tmp/prudai-logo.png"
 
+read_env_file_value() {
+  local file_path="$1"
+  local key="$2"
+
+  [[ -f "${file_path}" ]] || return 1
+
+  sed -n "s/^${key}=//p" "${file_path}" | head -n 1
+}
+
+discover_sendgrid_api_key() {
+  local candidate key
+
+  if [[ -n "${SENDGRID_API_KEY:-}" ]]; then
+    printf '%s' "${SENDGRID_API_KEY}"
+    return 0
+  fi
+
+  if [[ -n "${SENDGRID_KEY:-}" ]]; then
+    printf '%s' "${SENDGRID_KEY}"
+    return 0
+  fi
+
+  for candidate in \
+    "${ROOT_DIR}/.env.local" \
+    "/root/alex/.env" \
+    "/root/Prudai/odoo-careers/.env"
+  do
+    key="$(read_env_file_value "${candidate}" "SENDGRID_API_KEY" || true)"
+    if [[ -n "${key}" ]]; then
+      printf '%s' "${key}"
+      return 0
+    fi
+
+    key="$(read_env_file_value "${candidate}" "SENDGRID_KEY" || true)"
+    if [[ -n "${key}" ]]; then
+      printf '%s' "${key}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 wait_for_rails() {
   local attempt
   for attempt in $(seq 1 90); do
@@ -26,6 +69,8 @@ wait_for_rails() {
 
 wait_for_rails
 
+sendgrid_api_key="$(discover_sendgrid_api_key || true)"
+
 if [[ -f "${logo_source_path}" ]]; then
   docker cp "${logo_source_path}" "$(docker compose ps -q zammad-railsserver):${logo_container_path}"
 fi
@@ -37,6 +82,7 @@ raw_output="$(
     -e KC_CLIENT_ID="${KC_CLIENT_ID}" \
     -e KC_REALM="${KC_REALM}" \
     -e DOCS_SYNC_SERVICE_EMAIL="${DOCS_SYNC_SERVICE_EMAIL}" \
+    -e SENDGRID_API_KEY="${sendgrid_api_key}" \
     -e ZAMMAD_BOOTSTRAP_ADMIN_EMAIL="${ZAMMAD_BOOTSTRAP_ADMIN_EMAIL}" \
     -e ZAMMAD_FQDN="${ZAMMAD_FQDN}" \
     zammad-railsserver \
@@ -90,6 +136,9 @@ client_id = ENV.fetch('KC_CLIENT_ID', 'zammad-support')
 litellm_master_key = ENV.fetch('LITELLM_MASTER_KEY')
 docs_sync_email = ENV.fetch('DOCS_SYNC_SERVICE_EMAIL')
 bootstrap_admin_email = ENV.fetch('ZAMMAD_BOOTSTRAP_ADMIN_EMAIL')
+sendgrid_api_key = ENV.fetch('SENDGRID_API_KEY', '').strip
+
+users_group = Group.find_by!(name: 'Users')
 
 nl_locale = find_locale('nl-nl', 'nl')
 en_locale = find_locale('en-us', 'en')
@@ -185,20 +234,68 @@ else
   )
 end
 
-bootstrap_promoted = false
-bootstrap_admin_user = User.find_by(email: bootstrap_admin_email)
-if bootstrap_admin_user
-  bootstrap_admin_user.roles = [admin_role, agent_role]
-  bootstrap_admin_user.save!
-  bootstrap_promoted = true
+staff_emails = [bootstrap_admin_email, 'haisma@prudai.com'].map(&:downcase).uniq
+staff_configured = []
+
+staff_emails.each do |email|
+  user = User.find_by(email: email)
+  next if user.nil?
+
+  user.roles = [admin_role, agent_role]
+  user.group_names_access_map = { users_group.name => 'full' }
+  user.save!
+
+  staff_configured << email
 end
+
+Setting.set('notification_sender', '"PrudAI Support" <support@prudai.com>')
+
+smtp_configured = false
+unless sendgrid_api_key.empty?
+  Service::System::SetEmailNotificationConfiguration
+    .new(
+      adapter: 'smtp',
+      new_configuration: {
+        host:                 'smtp.sendgrid.net',
+        port:                 587,
+        user:                 'apikey',
+        password:             sendgrid_api_key,
+        enable_starttls_auto: true,
+        ssl_verify:           true
+      }
+    )
+    .execute
+
+  smtp_configured = true
+end
+
+ticket_trigger = Trigger.find_or_initialize_by(name: 'prudai notify support on new tickets')
+ticket_trigger.active = true
+ticket_trigger.created_by_id ||= 1
+ticket_trigger.updated_by_id = 1
+ticket_trigger.condition = {
+  'ticket.action'    => { 'operator' => 'is', 'value' => 'create' },
+  'ticket.state_id'  => { 'operator' => 'is not', 'value' => 4 },
+  'article.type_id'  => { 'operator' => 'is', 'value' => [1, 5, 11] },
+  'article.sender_id'=> { 'operator' => 'is', 'value' => 2 }
+}
+ticket_trigger.perform = {
+  'notification.email' => {
+    'subject'   => 'New support ticket (#{ticket.title})',
+    'recipient' => ['support@prudai.com'],
+    'body'      => '<div>A new support ticket <b>(#{config.ticket_hook}#{ticket.number})</b> was created.</div><br/><div><b>Title:</b> #{ticket.title}</div><div><b>Customer:</b> #{ticket.customer&.email}</div><div><b>Group:</b> #{ticket.group&.name}</div><div><b>Link:</b> <a href="#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}">#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}</a></div><br/><div>#{config.product_name}</div>'
+  }
+}
+ticket_trigger.save!
 
 puts "__RESULT__#{JSON.generate(
   kb_nl_id: kb_nl.id,
   kb_en_id: kb_en.id,
   docs_sync_token: docs_sync_token.token,
   docs_sync_email: docs_sync_user.email,
-  bootstrap_promoted: bootstrap_promoted
+  smtp_configured: smtp_configured,
+  staff_configured: staff_configured,
+  ticket_trigger_id: ticket_trigger.id
 )}"
 RUBY
 )"

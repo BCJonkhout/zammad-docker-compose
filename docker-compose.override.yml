@@ -1,0 +1,54 @@
+---
+x-prudai-zammad-image: &prudai-zammad-image
+  image: prudai/zammad-support:${VERSION:-7.0.0-0042}
+  build:
+    context: ./docker/zammad-assets
+    args:
+      BASE_IMAGE: ${IMAGE_REPO:-ghcr.io/zammad/zammad}:${VERSION:-7.0.0-0042}
+
+services:
+  zammad-backup:
+    <<: *prudai-zammad-image
+    environment:
+      PRUDAI_ASSET_VERSION: 20260326-5
+
+  zammad-init:
+    <<: *prudai-zammad-image
+    environment:
+      PRUDAI_ASSET_VERSION: 20260326-5
+
+  zammad-nginx:
+    <<: *prudai-zammad-image
+    environment:
+      PRUDAI_ASSET_VERSION: 20260326-5
+
+  zammad-railsserver:
+    <<: *prudai-zammad-image
+    environment:
+      PRUDAI_ASSET_VERSION: 20260326-5
+
+  zammad-scheduler:
+    <<: *prudai-zammad-image
+    environment:
+      PRUDAI_ASSET_VERSION: 20260326-5
+
+  zammad-websocket:
+    <<: *prudai-zammad-image
+    environment:
+      PRUDAI_ASSET_VERSION: 20260326-5
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    restart: ${RESTART:-always}
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_LOG: INFO
+      VERTEXAI_PROJECT_ID: ${VERTEXAI_PROJECT_ID}
+      VERTEXAI_LOCATION: ${VERTEXAI_LOCATION}
+      GOOGLE_APPLICATION_CREDENTIALS: /etc/secrets/prudai-a6715982179f.json
+    ports:
+      - "127.0.0.1:14000:4000"
+    volumes:
+      - ./docker/litellm/config.yaml:/app/config.yaml:ro
+      - ./secrets/prudai-a6715982179f.json:/etc/secrets/prudai-a6715982179f.json:ro
