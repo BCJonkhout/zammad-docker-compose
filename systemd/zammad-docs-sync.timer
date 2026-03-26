@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly docs.prudai.com sync for Zammad
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+Persistent=true
+Unit=zammad-docs-sync.service
+
+[Install]
+WantedBy=timers.target

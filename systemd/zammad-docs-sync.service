@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync docs.prudai.com into Zammad knowledge bases
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/zammad
+EnvironmentFile=/root/zammad/docs-sync.env
+ExecStart=/root/zammad/bin/run-docs-sync.sh
