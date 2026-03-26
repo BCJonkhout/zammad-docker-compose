@@ -249,6 +249,35 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
     return "\n".join(output)
 
 
+def strip_duplicate_leading_heading(title: str, markdown_text: str) -> str:
+    lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    first_content_index: int | None = None
+
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        first_content_index = index
+        break
+
+    if first_content_index is None:
+        return markdown_text
+
+    heading_match = re.match(r"^\s*#\s+(.+?)\s*$", lines[first_content_index])
+    if not heading_match:
+        return markdown_text
+
+    heading_title = normalize_whitespace(re.sub(r"[*_`]+", "", heading_match.group(1)))
+    page_title = normalize_whitespace(title)
+    if heading_title.casefold() != page_title.casefold():
+        return markdown_text
+
+    stripped_lines = lines[first_content_index + 1 :]
+    while stripped_lines and not stripped_lines[0].strip():
+        stripped_lines.pop(0)
+
+    return "\n".join(stripped_lines)
+
+
 def build_sidebar(language: str, base_url: str, sidebar_markdown: str) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef]]:
     categories: dict[tuple[str, ...], CategoryDef] = {}
     pages: list[PageDef] = []
@@ -308,7 +337,7 @@ def build_sidebar(language: str, base_url: str, sidebar_markdown: str) -> tuple[
 
 
 def build_answer_body(base_url: str, page: PageDef, markdown_text: str) -> str:
-    html_body = markdown_to_html(base_url, markdown_text)
+    html_body = markdown_to_html(base_url, strip_duplicate_leading_heading(page.title, markdown_text))
     source_line = (
         '<hr><p><strong>Source:</strong> '
         f'<a href="{html.escape(page.page_url, quote=True)}" target="_blank" rel="noopener noreferrer">{html.escape(page.page_url)}</a>'
