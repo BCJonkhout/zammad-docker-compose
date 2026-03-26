@@ -313,7 +313,7 @@ footer:has(a[href='https://zammad.org']) {
   width: 172px;
   height: 44px;
   margin-right: 18px;
-  background: url('/assets/prudai-logo.png?v=20260326-5') center/contain no-repeat;
+  background: url('/assets/prudai-logo.png?v=20260326-6') center/contain no-repeat;
 }
 
 .navigation,
@@ -418,7 +418,7 @@ footer:has(a[href='https://zammad.org']) {
   width: 132px !important;
   height: 36px !important;
   margin: 0 12px 0 12px !important;
-  background: url('/assets/prudai-logo.png?v=20260326-5') center/contain no-repeat !important;
+  background: url('/assets/prudai-logo.png?v=20260326-6') center/contain no-repeat !important;
 }
 
 .search .logo .icon-logo {
@@ -456,6 +456,16 @@ footer:has(a[href='https://zammad.org']) {
 .reporting .nav-pills > li.active > a:focus {
   color: #ffffff !important;
   background: #334155 !important;
+}
+
+.tabsSidebar-holder > .main.no-padding.flex.tabsSidebar-sidebarSpacer.tabsSidebar-tabsSpacer {
+  background: linear-gradient(180deg, #f7fbff 0%, #edf4ff 100%) !important;
+}
+
+.ticketZoom {
+  min-height: calc(100vh - 132px);
+  padding-bottom: 40px;
+  background: linear-gradient(180deg, #f7fbff 0%, #edf4ff 100%) !important;
 }
 
 .avatar--unique {

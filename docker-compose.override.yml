@@ -10,32 +10,32 @@ services:
   zammad-backup:
     <<: *prudai-zammad-image
     environment:
-      PRUDAI_ASSET_VERSION: 20260326-5
+      PRUDAI_ASSET_VERSION: 20260326-6
 
   zammad-init:
     <<: *prudai-zammad-image
     environment:
-      PRUDAI_ASSET_VERSION: 20260326-5
+      PRUDAI_ASSET_VERSION: 20260326-6
 
   zammad-nginx:
     <<: *prudai-zammad-image
     environment:
-      PRUDAI_ASSET_VERSION: 20260326-5
+      PRUDAI_ASSET_VERSION: 20260326-6
 
   zammad-railsserver:
     <<: *prudai-zammad-image
     environment:
-      PRUDAI_ASSET_VERSION: 20260326-5
+      PRUDAI_ASSET_VERSION: 20260326-6
 
   zammad-scheduler:
     <<: *prudai-zammad-image
     environment:
-      PRUDAI_ASSET_VERSION: 20260326-5
+      PRUDAI_ASSET_VERSION: 20260326-6
 
   zammad-websocket:
     <<: *prudai-zammad-image
     environment:
-      PRUDAI_ASSET_VERSION: 20260326-5
+      PRUDAI_ASSET_VERSION: 20260326-6
 
   litellm:
     image: docker.litellm.ai/berriai/litellm:main-latest
