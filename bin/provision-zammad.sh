@@ -71,6 +71,16 @@ PY
   chmod 600 "${file_path}"
 }
 
+write_secret_file() {
+  local file_path="$1"
+  local value="$2"
+
+  mkdir -p "$(dirname "${file_path}")"
+  chmod 700 "$(dirname "${file_path}")"
+  printf '%s\n' "${value}" > "${file_path}"
+  chmod 600 "${file_path}"
+}
+
 wait_for_rails() {
   local attempt
   for attempt in $(seq 1 90); do
@@ -90,9 +100,16 @@ sendgrid_api_key="$(discover_sendgrid_api_key || true)"
 docs_sync_service_email="${DOCS_SYNC_SERVICE_EMAIL:-docs-sync@support.prudai.com}"
 autoreply_service_email="${AUTOREPLY_SERVICE_EMAIL:-ai-agent@support.prudai.com}"
 autoreply_webhook_token_path="${ROOT_DIR}/secrets/autoreply-webhook.token"
+sendgrid_api_key_path="${ROOT_DIR}/secrets/sendgrid-api.key"
 
 ensure_secret_file "${autoreply_webhook_token_path}"
 autoreply_webhook_bearer_token="$(<"${autoreply_webhook_token_path}")"
+
+if [[ -n "${sendgrid_api_key}" ]]; then
+  write_secret_file "${sendgrid_api_key_path}" "${sendgrid_api_key}"
+else
+  rm -f "${sendgrid_api_key_path}"
+fi
 
 if [[ -f "${logo_source_path}" ]]; then
   docker cp "${logo_source_path}" "$(docker compose ps -q zammad-railsserver):${logo_container_path}"
@@ -173,9 +190,9 @@ def ensure_persistent_api_token(user:, name:, permissions: nil)
   end
 end
 
-def ensure_ticket_trigger(name:, action:, perform:, extra_condition: {}, article_sender_id: 2, article_type_ids: [1, 5, 11])
+def ensure_ticket_trigger(name:, action:, perform:, extra_condition: {}, article_sender_id: 2, article_type_ids: [1, 5, 11], active: true)
   trigger = Trigger.find_or_initialize_by(name: name)
-  trigger.active = true
+  trigger.active = active
   trigger.created_by_id ||= 1
   trigger.updated_by_id = 1
   trigger.condition = {
@@ -446,6 +463,7 @@ ticket_trigger = ensure_ticket_trigger(
   name: 'prudai notify support on ai escalation',
   action: 'create',
   perform: escalation_trigger_perform,
+  active: false,
   article_sender_id: 1,
   article_type_ids: nil,
   extra_condition: {
@@ -457,6 +475,7 @@ ticket_trigger_followup = ensure_ticket_trigger(
   name: 'prudai notify support on ai escalation (update)',
   action: 'update',
   perform: escalation_trigger_perform,
+  active: false,
   article_sender_id: 1,
   article_type_ids: nil,
   extra_condition: {

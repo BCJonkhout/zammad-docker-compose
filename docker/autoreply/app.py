@@ -5,7 +5,10 @@ import json
 import logging
 import os
 import re
+import smtplib
+import ssl
 from dataclasses import dataclass
+from email.message import EmailMessage
 from html import escape, unescape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -224,6 +227,18 @@ def read_secret(path_env: str) -> str:
     return value
 
 
+def read_secret_if_exists(path: str | None) -> str:
+    if not path:
+        return ""
+
+    normalized = str(path).strip()
+    if not normalized or not os.path.exists(normalized):
+        return ""
+
+    with open(normalized, "r", encoding="utf-8") as file:
+        return file.read().strip()
+
+
 class HTMLStripper(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -404,6 +419,11 @@ class ZammadClient:
         if not isinstance(payload, list):
             raise RuntimeError(f"Unexpected ticket articles payload for ticket {ticket_id}: {type(payload)!r}")
         return payload
+
+    def get_ticket_tags(self, ticket_id: int) -> list[str]:
+        payload = self.request("GET", f"/api/v1/tags?object=Ticket&o_id={ticket_id}")
+        tags = payload.get("tags") or []
+        return [str(tag).strip() for tag in tags if str(tag).strip()]
 
     def search_kb(self, kb_id: int, locale: str, query: str, *, flavor: str) -> list[SearchResult]:
         payload: dict[str, Any] = {
@@ -622,6 +642,19 @@ class AutoreplyService:
             model=getenv("LITELLM_MODEL", "gemini-support"),
         )
         self.webhook_token = read_secret("ZAMMAD_AUTOREPLY_WEBHOOK_TOKEN_FILE")
+        self.sendgrid_api_key = (
+            read_secret_if_exists(os.getenv("SENDGRID_API_KEY_FILE", "/run/prudai-secrets/sendgrid-api.key"))
+            or str(os.getenv("SENDGRID_API_KEY") or "").strip()
+        )
+        self.support_escalation_recipients = [
+            item.strip()
+            for item in str(os.getenv("SUPPORT_ESCALATION_EMAIL_TO", "support@prudai.com")).split(",")
+            if item.strip()
+        ]
+        self.support_escalation_from = str(os.getenv("SUPPORT_ESCALATION_EMAIL_FROM") or "support@prudai.com").strip()
+        self.support_escalation_from_name = (
+            str(os.getenv("SUPPORT_ESCALATION_EMAIL_FROM_NAME") or "PrudAI Support").strip()
+        )
 
     def is_authorized(self, header_value: str | None) -> bool:
         expected = f"Bearer {self.webhook_token}"
@@ -633,14 +666,24 @@ class AutoreplyService:
         ticket_id = int(ticket["id"])
         article_id = int(article["id"])
         article_marker = self._article_marker(ticket_id=ticket_id, article_id=article_id)
+        escalation_email_tag = self._escalation_email_tag(article_id)
 
         articles = self.zammad.get_ticket_articles(ticket_id)
         if self._already_processed(articles, article_marker):
+            escalation_email_sent = self._ensure_escalation_email_for_existing_marker(
+                ticket=ticket,
+                ticket_id=ticket_id,
+                article_id=article_id,
+                marker=article_marker,
+                articles=articles,
+                escalation_email_tag=escalation_email_tag,
+            )
             return {
-                "status": "skipped",
+                "status": "ok" if escalation_email_sent else "skipped",
                 "reason": "already_processed",
                 "ticket_id": ticket_id,
                 "article_id": article_id,
+                "escalation_email_sent": escalation_email_sent,
             }
 
         source_article = next((item for item in articles if int(item.get("id", 0)) == article_id), None)
@@ -691,6 +734,17 @@ class AutoreplyService:
             marker=article_marker,
         )
 
+        escalation_email_sent = False
+        if decision["disposition"] == DISPOSITION_ESCALATE:
+            escalation_email_sent = self._notify_support_of_escalation(
+                ticket=ticket,
+                ticket_id=ticket_id,
+                article_id=article_id,
+                source_article=source_article,
+            )
+            if escalation_email_sent:
+                self.zammad.add_tag(ticket_id, escalation_email_tag)
+
         return {
             "status": "ok",
             "ticket_id": ticket_id,
@@ -701,10 +755,14 @@ class AutoreplyService:
             "priority": decision["priority"],
             "used_sources": decision["used_sources"],
             "applied_tags": applied_tags,
+            "escalation_email_sent": escalation_email_sent,
         }
 
     def _article_marker(self, *, ticket_id: int, article_id: int) -> str:
         return f"{AUTOREPLY_MARKER_PREFIX}:ticket:{ticket_id}:article:{article_id}"
+
+    def _escalation_email_tag(self, article_id: int) -> str:
+        return f"ai-escalation-email-{article_id}"
 
     def _already_processed(self, articles: list[dict[str, Any]], marker: str) -> bool:
         for article in articles:
@@ -715,6 +773,43 @@ class AutoreplyService:
             if marker in body:
                 return True
         return False
+
+    def _ensure_escalation_email_for_existing_marker(
+        self,
+        *,
+        ticket: dict[str, Any],
+        ticket_id: int,
+        article_id: int,
+        marker: str,
+        articles: list[dict[str, Any]],
+        escalation_email_tag: str,
+    ) -> bool:
+        tags = set(self.zammad.get_ticket_tags(ticket_id))
+        if escalation_email_tag in tags:
+            return False
+
+        source_article = next((item for item in articles if int(item.get("id") or 0) == article_id), None)
+        if source_article is None:
+            return False
+
+        marker_articles = []
+        for item in articles:
+            preferences = item.get("preferences") or {}
+            if isinstance(preferences, dict) and str(preferences.get("prudai_marker") or "").strip() == marker:
+                marker_articles.append(item)
+
+        if not any("Disposition: escalate" in str(item.get("body") or "") for item in marker_articles):
+            return False
+
+        sent = self._notify_support_of_escalation(
+            ticket=ticket,
+            ticket_id=ticket_id,
+            article_id=article_id,
+            source_article=source_article,
+        )
+        if sent:
+            self.zammad.add_tag(ticket_id, escalation_email_tag)
+        return sent
 
     def _decide(
         self,
@@ -848,6 +943,76 @@ class AutoreplyService:
             "<p>Thanks for your message. I am escalating this ticket to a PrudAI Support employee now so "
             "you can get personal follow-up.</p>"
         )
+
+    def _notify_support_of_escalation(
+        self,
+        *,
+        ticket: dict[str, Any],
+        ticket_id: int,
+        article_id: int,
+        source_article: dict[str, Any],
+    ) -> bool:
+        if not self.support_escalation_recipients:
+            LOGGER.warning("Skipping escalation email for ticket %s because no recipients are configured.", ticket_id)
+            return False
+        if not self.sendgrid_api_key:
+            raise RuntimeError("Escalation email requested but SENDGRID_API_KEY is not configured.")
+
+        ticket_number = str(ticket.get("number") or ticket_id)
+        ticket_title = str(ticket.get("title") or source_article.get("subject") or f"Ticket {ticket_number}").strip()
+        customer_label = normalize_whitespace(str(source_article.get("from") or "")) or "Customer"
+        article_excerpt = clip(html_to_text(str(source_article.get("body") or "")), 600)
+        ticket_link = f"{self.public_base_url}/#ticket/zoom/{ticket_id}"
+
+        subject = f"PrudAI AI escalation ({ticket_title})"
+        text_body = "\n".join(
+            [
+                "PrudAI AI escalated a support ticket for human follow-up.",
+                "",
+                f"Ticket: #{ticket_number}",
+                f"Title: {ticket_title}",
+                f"Customer: {customer_label}",
+                f"Source article: {article_id}",
+                f"Link: {ticket_link}",
+                "",
+                "Latest customer message:",
+                article_excerpt or "[empty]",
+            ]
+        )
+        html_body = "\n".join(
+            [
+                "<div>PrudAI AI escalated a support ticket for human follow-up.</div>",
+                f"<div><strong>Ticket:</strong> #{escape(ticket_number)}</div>",
+                f"<div><strong>Title:</strong> {escape(ticket_title)}</div>",
+                f"<div><strong>Customer:</strong> {escape(customer_label)}</div>",
+                f"<div><strong>Source article:</strong> {article_id}</div>",
+                f'<div><strong>Link:</strong> <a href="{escape(ticket_link, quote=True)}">{escape(ticket_link)}</a></div>',
+                "<br>",
+                "<div><strong>Latest customer message:</strong></div>",
+                f"<div>{escape(article_excerpt or '[empty]')}</div>",
+            ]
+        )
+
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = f"{self.support_escalation_from_name} <{self.support_escalation_from}>"
+        message["To"] = ", ".join(self.support_escalation_recipients)
+        message.set_content(text_body)
+        message.add_alternative(html_body, subtype="html")
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP("smtp.sendgrid.net", 587, timeout=REQUEST_TIMEOUT) as smtp:
+            smtp.starttls(context=context)
+            smtp.login("apikey", self.sendgrid_api_key)
+            smtp.send_message(message)
+
+        LOGGER.info(
+            "Sent escalation email for ticket %s article %s to %s.",
+            ticket_id,
+            article_id,
+            ", ".join(self.support_escalation_recipients),
+        )
+        return True
 
     def _normalize_used_sources(self, raw_sources: Any, results: list[SearchResult]) -> list[int]:
         normalized: list[int] = []
