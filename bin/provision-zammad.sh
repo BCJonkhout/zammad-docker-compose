@@ -173,6 +173,85 @@ def ensure_persistent_api_token(user:, name:, permissions: nil)
   end
 end
 
+def ensure_ticket_trigger(name:, action:, perform:, extra_condition: {}, article_sender_id: 2, article_type_ids: [1, 5, 11])
+  trigger = Trigger.find_or_initialize_by(name: name)
+  trigger.active = true
+  trigger.created_by_id ||= 1
+  trigger.updated_by_id = 1
+  trigger.condition = {
+    'ticket.action'   => { 'operator' => 'is', 'value' => action },
+    'ticket.state_id' => { 'operator' => 'is not', 'value' => 4 }
+  }
+  trigger.condition['article.type_id'] = { 'operator' => 'is', 'value' => article_type_ids } if article_type_ids
+  trigger.condition['article.sender_id'] = { 'operator' => 'is', 'value' => article_sender_id } if article_sender_id
+  trigger.condition.merge!(extra_condition)
+  trigger.perform = perform
+  trigger.save!
+  trigger
+end
+
+def agent_notification_matrix(email_updates:)
+  {
+    'create' => {
+      'criteria' => {
+        'owned_by_me'     => true,
+        'owned_by_nobody' => true,
+        'subscribed'      => true,
+        'no'              => false
+      },
+      'channel' => {
+        'email'  => true,
+        'online' => true
+      }
+    },
+    'update' => {
+      'criteria' => {
+        'owned_by_me'     => true,
+        'owned_by_nobody' => true,
+        'subscribed'      => true,
+        'no'              => false
+      },
+      'channel' => {
+        'email'  => email_updates,
+        'online' => true
+      }
+    },
+    'reminder_reached' => {
+      'criteria' => {
+        'owned_by_me'     => true,
+        'owned_by_nobody' => false,
+        'subscribed'      => false,
+        'no'              => false
+      },
+      'channel' => {
+        'email'  => false,
+        'online' => true
+      }
+    },
+    'escalation' => {
+      'criteria' => {
+        'owned_by_me'     => true,
+        'owned_by_nobody' => false,
+        'subscribed'      => false,
+        'no'              => false
+      },
+      'channel' => {
+        'email'  => true,
+        'online' => true
+      }
+    }
+  }
+end
+
+def apply_user_preferences(user, *, locale:, theme:, notification_matrix:)
+  preferences = (user.preferences || {}).deep_stringify_keys
+  preferences['locale'] = locale
+  preferences['theme'] = theme
+  preferences['notification_config'] ||= {}
+  preferences['notification_config']['matrix'] = notification_matrix
+  user.preferences = preferences
+end
+
 fqdn = ENV.fetch('ZAMMAD_FQDN')
 realm = ENV.fetch('KC_REALM', 'prudai')
 client_id = ENV.fetch('KC_CLIENT_ID', 'zammad-support')
@@ -191,11 +270,20 @@ en_locale = find_locale('en-us', 'en')
 raise 'Missing nl locale in Zammad seed data.' if nl_locale.nil?
 raise 'Missing en locale in Zammad seed data.' if en_locale.nil?
 
+staff_notification_matrix = agent_notification_matrix(email_updates: false)
+service_notification_matrix = {
+  'create'            => { 'criteria' => { 'owned_by_me' => true, 'owned_by_nobody' => true, 'subscribed' => true, 'no' => false }, 'channel' => { 'email' => false, 'online' => false } },
+  'update'            => { 'criteria' => { 'owned_by_me' => true, 'owned_by_nobody' => true, 'subscribed' => true, 'no' => false }, 'channel' => { 'email' => false, 'online' => false } },
+  'reminder_reached'  => { 'criteria' => { 'owned_by_me' => true, 'owned_by_nobody' => false, 'subscribed' => false, 'no' => false }, 'channel' => { 'email' => false, 'online' => false } },
+  'escalation'        => { 'criteria' => { 'owned_by_me' => true, 'owned_by_nobody' => false, 'subscribed' => false, 'no' => false }, 'channel' => { 'email' => false, 'online' => false } }
+}
+
 Setting.set('fqdn', fqdn)
 Setting.set('http_type', 'https')
 Setting.set('organization', 'PrudAI')
 Setting.set('product_name', 'PrudAI Support')
 Setting.set('locale_default', nl_locale.locale)
+Setting.set('ticket_agent_default_notifications', staff_notification_matrix)
 
 logo_path = '/tmp/prudai-logo.png'
 if File.exist?(logo_path)
@@ -259,6 +347,12 @@ docs_sync_user.created_by_id ||= 1
 docs_sync_user.updated_by_id = 1
 docs_sync_user.password = SecureRandom.urlsafe_base64(32) if docs_sync_user.new_record?
 docs_sync_user.roles = [admin_role]
+apply_user_preferences(
+  docs_sync_user,
+  locale: nl_locale.locale,
+  theme: 'light',
+  notification_matrix: service_notification_matrix
+)
 docs_sync_user.save!
 
 docs_sync_token = ensure_persistent_api_token(
@@ -277,6 +371,12 @@ autoreply_user.updated_by_id = 1
 autoreply_user.password = SecureRandom.urlsafe_base64(32) if autoreply_user.new_record?
 autoreply_user.roles = [admin_role, agent_role]
 autoreply_user.group_names_access_map = { users_group.name => 'full' }
+apply_user_preferences(
+  autoreply_user,
+  locale: nl_locale.locale,
+  theme: 'light',
+  notification_matrix: service_notification_matrix
+)
 autoreply_user.save!
 
 autoreply_token = ensure_persistent_api_token(
@@ -294,6 +394,12 @@ staff_emails.each do |email|
 
   user.roles = [admin_role, agent_role]
   user.group_names_access_map = { users_group.name => 'full' }
+  apply_user_preferences(
+    user,
+    locale: nl_locale.locale,
+    theme: 'light',
+    notification_matrix: staff_notification_matrix
+  )
   user.save!
 
   staff_configured << email
@@ -320,27 +426,43 @@ unless sendgrid_api_key.empty?
   smtp_configured = true
 end
 
-ticket_trigger = Trigger.find_by(name: 'prudai notify support on ai escalation') ||
-  Trigger.find_by(name: 'prudai notify support on new tickets') ||
-  Trigger.new
-ticket_trigger.name = 'prudai notify support on ai escalation'
-ticket_trigger.active = true
-ticket_trigger.created_by_id ||= 1
-ticket_trigger.updated_by_id = 1
-ticket_trigger.condition = {
-  'ticket.action'    => { 'operator' => 'is', 'value' => ['create', 'update'] },
-  'ticket.state_id'  => { 'operator' => 'is not', 'value' => 4 },
-  'article.sender_id'=> { 'operator' => 'is', 'value' => 1 },
-  'article.body'     => { 'operator' => 'matches regex', 'value' => '(?im)PrudAI AI support agent.*Disposition:\\s*escalate' }
-}
-ticket_trigger.perform = {
+['auto reply (on new tickets)', 'auto reply (on follow-up of tickets)'].each do |trigger_name|
+  next unless (default_trigger = Trigger.find_by(name: trigger_name))
+
+  default_trigger.active = false
+  default_trigger.updated_by_id = 1
+  default_trigger.save!
+end
+
+escalation_trigger_perform = {
   'notification.email' => {
     'subject'   => 'PrudAI AI escalation (#{ticket.title})',
     'recipient' => ['support@prudai.com'],
     'body'      => '<div>PrudAI AI escalated ticket <b>(#{config.ticket_hook}#{ticket.number})</b> for human follow-up.</div><br/><div><b>Title:</b> #{ticket.title}</div><div><b>Customer:</b> #{ticket.customer&.email}</div><div><b>Group:</b> #{ticket.group&.name}</div><div><b>Link:</b> <a href="#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}">#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}</a></div><br/><div>#{config.product_name}</div>'
   }
 }
-ticket_trigger.save!
+
+ticket_trigger = ensure_ticket_trigger(
+  name: 'prudai notify support on ai escalation',
+  action: 'create',
+  perform: escalation_trigger_perform,
+  article_sender_id: 1,
+  article_type_ids: nil,
+  extra_condition: {
+    'article.body'      => { 'operator' => 'matches regex', 'value' => '(?im)PrudAI AI support agent.*Disposition:\\s*escalate' }
+  }
+)
+
+ticket_trigger_followup = ensure_ticket_trigger(
+  name: 'prudai notify support on ai escalation (update)',
+  action: 'update',
+  perform: escalation_trigger_perform,
+  article_sender_id: 1,
+  article_type_ids: nil,
+  extra_condition: {
+    'article.body'      => { 'operator' => 'matches regex', 'value' => '(?im)PrudAI AI support agent.*Disposition:\\s*escalate' }
+  }
+)
 
 autoreply_webhook = Webhook.find_or_initialize_by(name: 'prudai bm25 docs autoreply')
 autoreply_webhook.active = true
@@ -353,22 +475,25 @@ autoreply_webhook.bearer_token = autoreply_webhook_bearer_token
 autoreply_webhook.note = 'PrudAI BM25-grounded automation for new tickets and customer follow-ups.'
 autoreply_webhook.save!
 
-autoreply_trigger = Trigger.find_or_initialize_by(name: 'prudai ai first response on new tickets')
-autoreply_trigger.active = true
-autoreply_trigger.created_by_id ||= 1
-autoreply_trigger.updated_by_id = 1
-autoreply_trigger.condition = {
-  'ticket.action'    => { 'operator' => 'is', 'value' => ['create', 'update'] },
-  'ticket.state_id'  => { 'operator' => 'is not', 'value' => 4 },
-  'article.type_id'  => { 'operator' => 'is', 'value' => [1, 5, 11] },
-  'article.sender_id'=> { 'operator' => 'is', 'value' => 2 }
-}
-autoreply_trigger.perform = {
-  'notification.webhook' => {
-    'webhook_id' => autoreply_webhook.id
+autoreply_trigger = ensure_ticket_trigger(
+  name: 'prudai ai first response on new tickets',
+  action: 'create',
+  perform: {
+    'notification.webhook' => {
+      'webhook_id' => autoreply_webhook.id
+    }
   }
-}
-autoreply_trigger.save!
+)
+
+autoreply_trigger_followup = ensure_ticket_trigger(
+  name: 'prudai ai follow-up on customer messages',
+  action: 'update',
+  perform: {
+    'notification.webhook' => {
+      'webhook_id' => autoreply_webhook.id
+    }
+  }
+)
 
 puts "__RESULT__#{JSON.generate(
   kb_nl_id: kb_nl.id,
@@ -380,7 +505,9 @@ puts "__RESULT__#{JSON.generate(
   smtp_configured: smtp_configured,
   staff_configured: staff_configured,
   ticket_trigger_id: ticket_trigger.id,
+  ticket_trigger_followup_id: ticket_trigger_followup.id,
   autoreply_trigger_id: autoreply_trigger.id,
+  autoreply_trigger_followup_id: autoreply_trigger_followup.id,
   autoreply_webhook_id: autoreply_webhook.id
 )}"
 RUBY

@@ -477,13 +477,33 @@ class ZammadClient:
             return {}
         return self.request("PUT", f"/api/v1/tickets/{ticket_id}", json_body=json_body)
 
-    def create_public_reply(self, ticket_id: int, body_html: str) -> dict[str, Any]:
-        return self._create_article(ticket_id=ticket_id, body_html=body_html, internal=False, article_type="web")
+    def create_public_reply(self, ticket_id: int, body_html: str, *, marker: str) -> dict[str, Any]:
+        return self._create_article(
+            ticket_id=ticket_id,
+            body_html=body_html,
+            internal=False,
+            article_type="web",
+            preferences={"send-auto-response": False, "prudai_marker": marker},
+        )
 
-    def create_internal_note(self, ticket_id: int, body_html: str) -> dict[str, Any]:
-        return self._create_article(ticket_id=ticket_id, body_html=body_html, internal=True, article_type="note")
+    def create_internal_note(self, ticket_id: int, body_html: str, *, marker: str) -> dict[str, Any]:
+        return self._create_article(
+            ticket_id=ticket_id,
+            body_html=body_html,
+            internal=True,
+            article_type="note",
+            preferences={"prudai_marker": marker},
+        )
 
-    def _create_article(self, *, ticket_id: int, body_html: str, internal: bool, article_type: str) -> dict[str, Any]:
+    def _create_article(
+        self,
+        *,
+        ticket_id: int,
+        body_html: str,
+        internal: bool,
+        article_type: str,
+        preferences: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self.request(
             "POST",
             "/api/v1/ticket_articles",
@@ -495,6 +515,7 @@ class ZammadClient:
                 "sender": "Agent",
                 "type": article_type,
                 "internal": internal,
+                "preferences": preferences or {},
             },
         )
 
@@ -656,16 +677,18 @@ class AutoreplyService:
         )
 
         public_article_id = None
-        if decision["disposition"] == DISPOSITION_REPLY and decision["customer_reply_html"]:
+        if decision["customer_reply_html"]:
             public_reply = self.zammad.create_public_reply(
                 ticket_id,
-                self._build_customer_reply_html(decision, results, article_marker=article_marker),
+                self._build_customer_reply_html(decision, results),
+                marker=article_marker,
             )
             public_article_id = public_reply.get("id")
 
         internal_note = self.zammad.create_internal_note(
             ticket_id,
-            self._build_internal_note_html(decision, results, article_marker=article_marker),
+            self._build_internal_note_html(decision, results),
+            marker=article_marker,
         )
 
         return {
@@ -685,6 +708,9 @@ class AutoreplyService:
 
     def _already_processed(self, articles: list[dict[str, Any]], marker: str) -> bool:
         for article in articles:
+            preferences = article.get("preferences") or {}
+            if isinstance(preferences, dict) and str(preferences.get("prudai_marker") or "").strip() == marker:
+                return True
             body = str(article.get("body") or "")
             if marker in body:
                 return True
@@ -763,7 +789,10 @@ class AutoreplyService:
             disposition = DISPOSITION_HANDOFF if not policy_signals else DISPOSITION_ESCALATE
             customer_reply_html = ""
 
-        if disposition != DISPOSITION_REPLY:
+        if disposition == DISPOSITION_ESCALATE and not customer_reply_html:
+            customer_reply_html = self._default_escalation_reply_html(language=language)
+
+        if disposition not in {DISPOSITION_REPLY, DISPOSITION_ESCALATE}:
             customer_reply_html = ""
 
         if disposition == DISPOSITION_ESCALATE:
@@ -807,6 +836,18 @@ class AutoreplyService:
         if disposition == DISPOSITION_ESCALATE:
             return "<p>The ticket was marked for fast human follow-up because of its risk or urgency.</p>"
         return "<p>No safe documentation-based answer was found, so the ticket was handed to a human agent.</p>"
+
+    def _default_escalation_reply_html(self, *, language: str) -> str:
+        if language == "nl":
+            return (
+                "<p>Dank voor uw bericht. Ik zet dit direct door naar een medewerker van PrudAI Support, "
+                "zodat u hier persoonlijke hulp bij krijgt.</p>"
+            )
+
+        return (
+            "<p>Thanks for your message. I am escalating this ticket to a PrudAI Support employee now so "
+            "you can get personal follow-up.</p>"
+        )
 
     def _normalize_used_sources(self, raw_sources: Any, results: list[SearchResult]) -> list[int]:
         normalized: list[int] = []
@@ -946,11 +987,9 @@ class AutoreplyService:
         self,
         decision: dict[str, Any],
         results: list[SearchResult],
-        *,
-        article_marker: str,
     ) -> str:
-        parts = [f"<!-- {article_marker} -->", decision["customer_reply_html"]]
-        if decision["used_sources"]:
+        parts = [decision["customer_reply_html"]]
+        if decision["disposition"] == DISPOSITION_REPLY and decision["used_sources"]:
             parts.append("<hr><p><strong>Relevant PrudAI docs:</strong></p><ul>")
             for index in decision["used_sources"]:
                 result = results[index - 1]
@@ -964,15 +1003,12 @@ class AutoreplyService:
         self,
         decision: dict[str, Any],
         results: list[SearchResult],
-        *,
-        article_marker: str,
     ) -> str:
         disposition_label = escape(decision["disposition"].replace("_", " "))
         category_label = escape(decision["category"].replace("_", " "))
         priority_label = escape(decision["priority"])
 
         parts = [
-            f"<!-- {article_marker} -->",
             "<p><strong>PrudAI AI support agent</strong></p>",
             "<ul>",
             f"<li>Disposition: {disposition_label}</li>",
@@ -1011,11 +1047,14 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            LOGGER.warning("Webhook client disconnected before response body could be written.")
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
