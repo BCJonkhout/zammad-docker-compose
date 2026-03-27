@@ -176,16 +176,230 @@ select:focus,
 .request_admin_password_auth .hero-unit,
 .signup .hero-unit {
   width: min(480px, 100%) !important;
-  padding: 34px 32px !important;
-  border-radius: 28px !important;
+  padding: 40px 36px 34px !important;
+  border-radius: 30px !important;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%) !important;
+  border-color: rgba(219, 227, 238, 0.92) !important;
+  box-shadow: 0 32px 84px rgba(15, 23, 42, 0.14) !important;
+}
+
+.login .fullscreen-body {
+  width: min(540px, calc(100% - 32px)) !important;
+  margin: 0 auto !important;
+  padding: 14px 0 30px !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.login .fullscreen-body > p:first-child {
+  width: min(480px, 100%) !important;
+  margin: 0 auto 18px !important;
+  text-align: center !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: #64748b !important;
 }
 
 .login .company-logo {
-  display: block !important;
-  max-width: 240px !important;
-  max-height: 88px !important;
-  margin: 8px auto 32px !important;
+  display: none !important;
+}
+
+.login .hero-unit::before {
+  content: '';
+  display: block;
+  width: min(270px, 100%);
+  height: 74px;
+  margin: 0 auto 22px;
+  background: var(--prudai-logo-url) center/contain no-repeat;
   filter: none !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .separator {
+  width: 100%;
+  margin: 0 0 10px !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .separator-text {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  font-size: 11px !important;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #64748b !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .auth-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0 0 6px;
+}
+
+.login .hero-unit.prudai-login-prioritised .auth-providers form {
+  margin: 0;
+}
+
+.login .hero-unit.prudai-login-prioritised .auth-provider {
+  min-height: 60px;
+  justify-content: center;
+  padding: 0 18px;
+  background: linear-gradient(135deg, var(--prudai-primary) 0%, var(--prudai-primary-light) 100%) !important;
+  border: 1px solid var(--prudai-primary) !important;
+  border-radius: 18px !important;
+  box-shadow: 0 22px 38px rgba(52, 92, 243, 0.22) !important;
+  color: #ffffff !important;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.login .hero-unit.prudai-login-prioritised .auth-provider:hover,
+.login .hero-unit.prudai-login-prioritised .auth-provider:focus {
+  background: linear-gradient(135deg, var(--prudai-primary-dark) 0%, var(--prudai-primary) 100%) !important;
+  border-color: var(--prudai-primary-dark) !important;
+  box-shadow: 0 26px 42px rgba(52, 92, 243, 0.28) !important;
+  filter: saturate(1.02);
+  transform: translateY(-1px);
+}
+
+.login .hero-unit.prudai-login-prioritised .auth-provider .provider-icon,
+.login .hero-unit.prudai-login-prioritised .auth-provider .provider-name {
+  color: #ffffff !important;
+  fill: currentColor !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details {
+  margin: 18px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  list-style: none;
+  transition: color 0.18s ease;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-toggle-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-toggle-label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #64748b;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-toggle-hint {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: #94a3b8;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-toggle-icon {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #dbe3ee;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.06);
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-toggle-icon::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid #64748b;
+  border-bottom: 2px solid #64748b;
+  transform: translate(-50%, -62%) rotate(45deg);
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary:hover .prudai-password-toggle-label,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary:focus .prudai-password-toggle-label,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details[open] > summary .prudai-password-toggle-label {
+  color: var(--prudai-primary);
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary:hover .prudai-password-toggle-icon,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary:focus .prudai-password-toggle-icon,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details[open] > summary .prudai-password-toggle-icon {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  box-shadow: 0 14px 26px rgba(52, 92, 243, 0.12);
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary:hover .prudai-password-toggle-icon::before,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details > summary:focus .prudai-password-toggle-icon::before,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details[open] > summary .prudai-password-toggle-icon::before {
+  border-color: var(--prudai-primary);
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details[open] > summary .prudai-password-toggle-icon::before {
+  transform: translate(-50%, -38%) rotate(-135deg);
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details[open] #login {
+  margin-top: 14px;
+  padding: 22px 20px 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(251, 253, 255, 0.98) 0%, rgba(245, 248, 255, 0.92) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details:not([open]) #login {
+  display: none;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .form-group {
+  margin-bottom: 16px;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .form-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .form-control {
+  min-height: 44px;
+  background: rgba(255, 255, 255, 0.98) !important;
 }
 
 .login p,
@@ -215,6 +429,61 @@ select:focus,
 .separator-text {
   background: transparent !important;
   color: #64748b !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .separator-text {
+  padding: 0 12px;
+  background: #ffffff !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .btn--primary,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .btn-primary,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login button[type='submit'] {
+  min-height: 48px;
+  background: #ffffff !important;
+  border: 1px solid #c7d2fe !important;
+  border-radius: 16px !important;
+  box-shadow: 0 10px 22px rgba(52, 92, 243, 0.08) !important;
+  color: var(--prudai-primary) !important;
+  font-weight: 700;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .btn--primary:hover,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .btn-primary:hover,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login button[type='submit']:hover {
+  background: #eef2ff !important;
+  border-color: #c7d2fe !important;
+  color: var(--prudai-primary) !important;
+  box-shadow: 0 14px 24px rgba(52, 92, 243, 0.12) !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .checkbox,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login label,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .formGroup-label label {
+  color: #64748b !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .checkbox {
+  margin-top: 2px;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .link,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login a {
+  color: #64748b !important;
+}
+
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login .link:hover,
+.login .hero-unit.prudai-login-prioritised .prudai-password-details #login a:hover {
+  color: var(--prudai-primary) !important;
+}
+
+.login .hero-unit + p,
+.login .hero-unit ~ p,
+.login .hero-unit ~ .js-footer,
+.login .hero-unit ~ hr {
+  width: min(440px, 100%) !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
 }
 
 .auth-provider,
@@ -313,7 +582,7 @@ footer:has(a[href='https://zammad.org']) {
   width: 172px;
   height: 44px;
   margin-right: 18px;
-  background: url('/assets/prudai-logo.png?v=20260326-6') center/contain no-repeat;
+  background: url('/assets/prudai-logo.png?v=20260327-7') center/contain no-repeat;
 }
 
 .navigation,
@@ -418,7 +687,7 @@ footer:has(a[href='https://zammad.org']) {
   width: 132px !important;
   height: 36px !important;
   margin: 0 12px 0 12px !important;
-  background: url('/assets/prudai-logo.png?v=20260326-6') center/contain no-repeat !important;
+  background: url('/assets/prudai-logo.png?v=20260327-7') center/contain no-repeat !important;
 }
 
 .search .logo .icon-logo {
@@ -521,7 +790,7 @@ footer:has(a[href='https://zammad.org']) {
 }
 
 .article-add .articleNewEdit-body:empty::before {
-  content: 'Write an internal note or reply here...';
+  content: 'Schrijf hier een interne notitie of antwoord...';
   color: #94a3b8;
 }
 
@@ -564,6 +833,26 @@ footer:has(a[href='https://zammad.org']) {
 .article-add .attachmentPlaceholder-label:hover,
 .article-add .attachmentPlaceholder-label:focus {
   color: var(--prudai-primary) !important;
+}
+
+.prudai-ticket-bottombar {
+  position: static !important;
+  z-index: auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  justify-content: flex-end !important;
+  padding: 12px 0 0 !important;
+  border-top: 0 !important;
+  background: transparent !important;
+  gap: 12px !important;
+}
+
+.prudai-ticket-bottombar button {
+  border-radius: 16px !important;
+}
+
+.prudai-ticket-bottombar > div:first-child {
+  margin-right: auto !important;
 }
 
 img[src*='product_logo'],

@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("prudai-autoreply")
 
-AUTOREPLY_MARKER = "prudai-autoreply:docs-bm25:v1"
+AUTOREPLY_MARKER_PREFIX = "prudai-autoreply:docs-bm25:v2"
 DEFAULT_PORT = int(os.getenv("PORT", "8081"))
 REQUEST_TIMEOUT = 60
 SEARCH_LIMIT_PER_KB = 4
@@ -611,10 +611,16 @@ class AutoreplyService:
         article = payload.get("article") or {}
         ticket_id = int(ticket["id"])
         article_id = int(article["id"])
+        article_marker = self._article_marker(ticket_id=ticket_id, article_id=article_id)
 
         articles = self.zammad.get_ticket_articles(ticket_id)
-        if self._already_processed(articles):
-            return {"status": "skipped", "reason": "already_processed", "ticket_id": ticket_id}
+        if self._already_processed(articles, article_marker):
+            return {
+                "status": "skipped",
+                "reason": "already_processed",
+                "ticket_id": ticket_id,
+                "article_id": article_id,
+            }
 
         source_article = next((item for item in articles if int(item.get("id", 0)) == article_id), None)
         if source_article is None:
@@ -651,10 +657,16 @@ class AutoreplyService:
 
         public_article_id = None
         if decision["disposition"] == DISPOSITION_REPLY and decision["customer_reply_html"]:
-            public_reply = self.zammad.create_public_reply(ticket_id, self._build_customer_reply_html(decision, results))
+            public_reply = self.zammad.create_public_reply(
+                ticket_id,
+                self._build_customer_reply_html(decision, results, article_marker=article_marker),
+            )
             public_article_id = public_reply.get("id")
 
-        internal_note = self.zammad.create_internal_note(ticket_id, self._build_internal_note_html(decision, results))
+        internal_note = self.zammad.create_internal_note(
+            ticket_id,
+            self._build_internal_note_html(decision, results, article_marker=article_marker),
+        )
 
         return {
             "status": "ok",
@@ -668,10 +680,13 @@ class AutoreplyService:
             "applied_tags": applied_tags,
         }
 
-    def _already_processed(self, articles: list[dict[str, Any]]) -> bool:
+    def _article_marker(self, *, ticket_id: int, article_id: int) -> str:
+        return f"{AUTOREPLY_MARKER_PREFIX}:ticket:{ticket_id}:article:{article_id}"
+
+    def _already_processed(self, articles: list[dict[str, Any]], marker: str) -> bool:
         for article in articles:
             body = str(article.get("body") or "")
-            if AUTOREPLY_MARKER in body:
+            if marker in body:
                 return True
         return False
 
@@ -927,8 +942,14 @@ class AutoreplyService:
     def _fallback_public_url(self) -> str:
         return f"{self.public_base_url}/help"
 
-    def _build_customer_reply_html(self, decision: dict[str, Any], results: list[SearchResult]) -> str:
-        parts = [f"<!-- {AUTOREPLY_MARKER} -->", decision["customer_reply_html"]]
+    def _build_customer_reply_html(
+        self,
+        decision: dict[str, Any],
+        results: list[SearchResult],
+        *,
+        article_marker: str,
+    ) -> str:
+        parts = [f"<!-- {article_marker} -->", decision["customer_reply_html"]]
         if decision["used_sources"]:
             parts.append("<hr><p><strong>Relevant PrudAI docs:</strong></p><ul>")
             for index in decision["used_sources"]:
@@ -939,13 +960,19 @@ class AutoreplyService:
             parts.append("</ul>")
         return "\n".join(parts)
 
-    def _build_internal_note_html(self, decision: dict[str, Any], results: list[SearchResult]) -> str:
+    def _build_internal_note_html(
+        self,
+        decision: dict[str, Any],
+        results: list[SearchResult],
+        *,
+        article_marker: str,
+    ) -> str:
         disposition_label = escape(decision["disposition"].replace("_", " "))
         category_label = escape(decision["category"].replace("_", " "))
         priority_label = escape(decision["priority"])
 
         parts = [
-            f"<!-- {AUTOREPLY_MARKER} -->",
+            f"<!-- {article_marker} -->",
             "<p><strong>PrudAI AI support agent</strong></p>",
             "<ul>",
             f"<li>Disposition: {disposition_label}</li>",

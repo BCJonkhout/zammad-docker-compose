@@ -195,6 +195,7 @@ Setting.set('fqdn', fqdn)
 Setting.set('http_type', 'https')
 Setting.set('organization', 'PrudAI')
 Setting.set('product_name', 'PrudAI Support')
+Setting.set('locale_default', nl_locale.locale)
 
 logo_path = '/tmp/prudai-logo.png'
 if File.exist?(logo_path)
@@ -207,7 +208,7 @@ Setting.set('auth_openid_connect', true)
 Setting.set(
   'auth_openid_connect_credentials',
   {
-    'display_name' => 'PrudAI SSO',
+    'display_name' => 'Login met PrudAI',
     'identifier'   => client_id,
     'issuer'       => "https://login.prudai.com/realms/#{realm}",
     'uid_field'    => 'sub',
@@ -319,21 +320,24 @@ unless sendgrid_api_key.empty?
   smtp_configured = true
 end
 
-ticket_trigger = Trigger.find_or_initialize_by(name: 'prudai notify support on new tickets')
+ticket_trigger = Trigger.find_by(name: 'prudai notify support on ai escalation') ||
+  Trigger.find_by(name: 'prudai notify support on new tickets') ||
+  Trigger.new
+ticket_trigger.name = 'prudai notify support on ai escalation'
 ticket_trigger.active = true
 ticket_trigger.created_by_id ||= 1
 ticket_trigger.updated_by_id = 1
 ticket_trigger.condition = {
-  'ticket.action'    => { 'operator' => 'is', 'value' => 'create' },
+  'ticket.action'    => { 'operator' => 'is', 'value' => ['create', 'update'] },
   'ticket.state_id'  => { 'operator' => 'is not', 'value' => 4 },
-  'article.type_id'  => { 'operator' => 'is', 'value' => [1, 5, 11] },
-  'article.sender_id'=> { 'operator' => 'is', 'value' => 2 }
+  'article.sender_id'=> { 'operator' => 'is', 'value' => 1 },
+  'article.body'     => { 'operator' => 'matches regex', 'value' => '(?im)PrudAI AI support agent.*Disposition:\\s*escalate' }
 }
 ticket_trigger.perform = {
   'notification.email' => {
-    'subject'   => 'New support ticket (#{ticket.title})',
+    'subject'   => 'PrudAI AI escalation (#{ticket.title})',
     'recipient' => ['support@prudai.com'],
-    'body'      => '<div>A new support ticket <b>(#{config.ticket_hook}#{ticket.number})</b> was created.</div><br/><div><b>Title:</b> #{ticket.title}</div><div><b>Customer:</b> #{ticket.customer&.email}</div><div><b>Group:</b> #{ticket.group&.name}</div><div><b>Link:</b> <a href="#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}">#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}</a></div><br/><div>#{config.product_name}</div>'
+    'body'      => '<div>PrudAI AI escalated ticket <b>(#{config.ticket_hook}#{ticket.number})</b> for human follow-up.</div><br/><div><b>Title:</b> #{ticket.title}</div><div><b>Customer:</b> #{ticket.customer&.email}</div><div><b>Group:</b> #{ticket.group&.name}</div><div><b>Link:</b> <a href="#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}">#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}</a></div><br/><div>#{config.product_name}</div>'
   }
 }
 ticket_trigger.save!
@@ -346,7 +350,7 @@ autoreply_webhook.ssl_verify = false
 autoreply_webhook.customized_payload = false
 autoreply_webhook.custom_payload = nil
 autoreply_webhook.bearer_token = autoreply_webhook_bearer_token
-autoreply_webhook.note = 'PrudAI BM25-grounded first-response automation for new support tickets.'
+autoreply_webhook.note = 'PrudAI BM25-grounded automation for new tickets and customer follow-ups.'
 autoreply_webhook.save!
 
 autoreply_trigger = Trigger.find_or_initialize_by(name: 'prudai ai first response on new tickets')
@@ -354,7 +358,7 @@ autoreply_trigger.active = true
 autoreply_trigger.created_by_id ||= 1
 autoreply_trigger.updated_by_id = 1
 autoreply_trigger.condition = {
-  'ticket.action'    => { 'operator' => 'is', 'value' => 'create' },
+  'ticket.action'    => { 'operator' => 'is', 'value' => ['create', 'update'] },
   'ticket.state_id'  => { 'operator' => 'is not', 'value' => 4 },
   'article.type_id'  => { 'operator' => 'is', 'value' => [1, 5, 11] },
   'article.sender_id'=> { 'operator' => 'is', 'value' => 2 }

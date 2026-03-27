@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html>
+<html data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width">
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="color-scheme" content="light" />
-  <% prudai_asset_version = ENV.fetch('PRUDAI_ASSET_VERSION', '20260326-6') %>
+  <% prudai_asset_version = ENV.fetch('PRUDAI_ASSET_VERSION', '20260327-7') %>
   <title><%= Setting.get('product_name') %></title>
   <link rel="icon" type="image/png" sizes="32x32" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
@@ -14,6 +14,13 @@
   <meta name="theme-color" content="#345CF3" />
   <%= stylesheet_link_tag "#{path_to_stylesheet('application.css')}?v=#{prudai_asset_version}", :media => 'all' %>
   <%= stylesheet_link_tag "#{path_to_stylesheet('application-print.css')}?v=#{prudai_asset_version}", :media => 'print' %>
+  <style nonce="<%= content_security_policy_nonce %>">
+    :root,
+    [data-theme='light'],
+    [data-theme='dark'] {
+      --prudai-logo-url: url('/assets/prudai-logo.png?v=<%= prudai_asset_version %>');
+    }
+  </style>
   <%= javascript_tag nonce: true do -%>
     if(window.MSInputMethodContext && document.documentMode){
       var polyfillScriptTag = document.createElement('script');
@@ -23,17 +30,271 @@
     }
 
     try {
-      var storedTheme = localStorage.getItem('theme');
-
-      if (!storedTheme && !window.location.href.includes('/tests_')) {
+      if (!window.location.href.includes('/tests_')) {
         localStorage.setItem('theme', 'light');
-        storedTheme = 'light';
+        localStorage.setItem('locale', 'nl-nl');
       }
 
-      document.documentElement.dataset.theme = storedTheme === 'dark' ? 'dark' : 'light';
-    } catch (e) {
+      document.documentElement.lang = 'nl';
       document.documentElement.dataset.theme = 'light';
+      document.documentElement.style.colorScheme = 'light';
+    } catch (e) {
+      document.documentElement.lang = 'nl';
+      document.documentElement.dataset.theme = 'light';
+      document.documentElement.style.colorScheme = 'light';
     }
+  <% end -%>
+  <%= javascript_tag nonce: true do -%>
+    (function() {
+      function normalizeText(value) {
+        return (value || '').replace(/\s+/g, ' ').trim();
+      }
+
+      function replaceExactText(root, replacements) {
+        if (!root) return;
+
+        Array.prototype.forEach.call(root.querySelectorAll('*'), function(node) {
+          if (!node || node.children.length > 0) return;
+
+          var current = normalizeText(node.textContent);
+          if (!current || !Object.prototype.hasOwnProperty.call(replacements, current)) return;
+
+          node.textContent = replacements[current];
+        });
+      }
+
+      function localizePrudaiLogin(loginRoot, authProviders) {
+        if (!loginRoot || loginRoot.dataset.prudaiLocalized === 'true') return;
+
+        document.documentElement.lang = 'nl';
+        if (/ - Sign in$/.test(document.title)) {
+          document.title = 'PrudAI Support - Inloggen';
+        }
+
+        var heading = loginRoot.querySelector('.fullscreen-body > p:first-child');
+        if (heading) {
+          heading.textContent = 'Inloggen bij support.prudai.com';
+        }
+
+        if (authProviders) {
+          Array.prototype.forEach.call(authProviders.querySelectorAll('.provider-name'), function(node) {
+            node.textContent = 'Login met PrudAI';
+          });
+        }
+
+        var usernameLabel = loginRoot.querySelector('label[for="username"]');
+        if (usernameLabel) {
+          usernameLabel.textContent = 'E-mailadres';
+        }
+
+        var passwordLabel = loginRoot.querySelector('label[for="password"]');
+        if (passwordLabel) {
+          passwordLabel.textContent = 'Wachtwoord';
+        }
+
+        var rememberLabel = loginRoot.querySelector('.label-text');
+        if (rememberLabel) {
+          rememberLabel.textContent = 'Onthoud mij';
+        }
+
+        var loginButton = loginRoot.querySelector('#login button[type="submit"]');
+        if (loginButton) {
+          loginButton.textContent = 'Inloggen';
+        }
+
+        var forgotPasswordLink = loginRoot.querySelector('#login a[href="#password_reset"]');
+        if (forgotPasswordLink) {
+          forgotPasswordLink.textContent = 'Wachtwoord vergeten?';
+        }
+
+        var footerPasswordLink = loginRoot.querySelector('.js-footer a[href="#password_reset"]');
+        if (footerPasswordLink) {
+          var footerPasswordParagraph = footerPasswordLink.closest('p');
+          if (footerPasswordParagraph) {
+            footerPasswordParagraph.innerHTML = 'Je bent al geregistreerd met je e-mailadres als je eerder contact hebt gehad met ons supportteam.<br>Je kunt <a href="#password_reset">hier</a> een wachtwoord aanvragen.';
+          }
+        }
+
+        var registerLink = loginRoot.querySelector('.js-footer a[href="#signup"]');
+        if (registerLink) {
+          registerLink.textContent = 'Registreer als nieuwe klant';
+        }
+
+        replaceExactText(loginRoot, {
+          'Log in to support.prudai.com': 'Inloggen bij support.prudai.com',
+          'USERNAME / EMAIL': 'E-MAILADRES',
+          'Username / Email': 'E-mailadres',
+          'Username / email': 'E-mailadres',
+          'PASSWORD': 'WACHTWOORD',
+          'Password': 'Wachtwoord',
+          'Remember me': 'Onthoud mij',
+          'Sign in': 'Inloggen',
+          'Forgot password?': 'Wachtwoord vergeten?',
+          'Register as a new customer': 'Registreer als nieuwe klant',
+          "You're already registered with your email address if you've been in touch with our Support team.": 'Je bent al geregistreerd met je e-mailadres als je eerder contact hebt gehad met ons supportteam.',
+          'You can request your password here.': 'Je kunt hier een wachtwoord aanvragen.',
+          'OR SIGN IN USING': 'AANBEVOLEN',
+          'Loading...': 'Laden...',
+          'Loading…': 'Laden...'
+        });
+
+        loginRoot.dataset.prudaiLocalized = 'true';
+      }
+
+      function localizePrudaiTicketComposer(bottomBar) {
+        if (!bottomBar) return;
+
+        replaceExactText(bottomBar, {
+          'Stay on tab': 'Blijf op tabblad',
+          'Update': 'Bijwerken',
+          'Discard your unsaved changes': 'Verwerp niet-opgeslagen wijzigingen'
+        });
+      }
+
+      function dockPrudaiTicketBottomBar() {
+        var editor = document.querySelector('.article-add');
+        var bottomBar = document.querySelector('footer.sticky.z-30');
+
+        if (!editor || !bottomBar) return;
+
+        bottomBar.classList.add('prudai-ticket-bottombar');
+        localizePrudaiTicketComposer(bottomBar);
+
+        if (editor.nextElementSibling !== bottomBar) {
+          editor.insertAdjacentElement('afterend', bottomBar);
+        }
+      }
+
+      function prioritizePrudaiSso() {
+        var loginRoot = document.querySelector('.login');
+        var hero = loginRoot && loginRoot.querySelector('.hero-unit');
+        if (!hero || hero.dataset.prudaiSsoReady === 'true') return;
+
+        var authProviders = hero.querySelector('.auth-providers');
+        var loginForm = hero.querySelector('#login.js-form');
+        if (!authProviders || !loginForm) return;
+
+        localizePrudaiLogin(loginRoot, authProviders);
+
+        var separator = hero.querySelector('.separator');
+        if (!separator) {
+          separator = document.createElement('div');
+          separator.className = 'separator';
+
+          var separatorText = document.createElement('span');
+          separatorText.className = 'separator-text';
+          separator.appendChild(separatorText);
+        }
+
+        var separatorText = separator.querySelector('.separator-text');
+        if (separatorText) {
+          separatorText.textContent = 'Aanbevolen';
+        }
+
+        hero.insertBefore(separator, loginForm);
+        hero.insertBefore(authProviders, loginForm);
+
+        var legacyPasswordLabel = hero.querySelector('.prudai-password-label');
+        if (legacyPasswordLabel) {
+          legacyPasswordLabel.remove();
+        }
+
+        var passwordDetails = hero.querySelector('.prudai-password-details');
+        if (!passwordDetails) {
+          passwordDetails = document.createElement('details');
+          passwordDetails.className = 'prudai-password-details';
+        }
+
+        var passwordSummary = passwordDetails.querySelector('summary');
+        if (!passwordSummary) {
+          passwordSummary = document.createElement('summary');
+          passwordSummary.className = 'prudai-password-toggle';
+          passwordDetails.appendChild(passwordSummary);
+        }
+
+        var passwordSummaryCopy = passwordSummary.querySelector('.prudai-password-toggle-copy');
+        if (!passwordSummaryCopy) {
+          passwordSummaryCopy = document.createElement('span');
+          passwordSummaryCopy.className = 'prudai-password-toggle-copy';
+          passwordSummary.appendChild(passwordSummaryCopy);
+        }
+
+        var passwordSummaryLabel = passwordSummaryCopy.querySelector('.prudai-password-toggle-label');
+        if (!passwordSummaryLabel) {
+          passwordSummaryLabel = document.createElement('span');
+          passwordSummaryLabel.className = 'prudai-password-toggle-label';
+          passwordSummaryCopy.appendChild(passwordSummaryLabel);
+        }
+
+        var passwordSummaryHint = passwordSummaryCopy.querySelector('.prudai-password-toggle-hint');
+        if (!passwordSummaryHint) {
+          passwordSummaryHint = document.createElement('span');
+          passwordSummaryHint.className = 'prudai-password-toggle-hint';
+          passwordSummaryCopy.appendChild(passwordSummaryHint);
+        }
+
+        var passwordSummaryIcon = passwordSummary.querySelector('.prudai-password-toggle-icon');
+        if (!passwordSummaryIcon) {
+          passwordSummaryIcon = document.createElement('span');
+          passwordSummaryIcon.className = 'prudai-password-toggle-icon';
+          passwordSummary.setAttribute('role', 'button');
+          passwordSummary.appendChild(passwordSummaryIcon);
+        }
+
+        passwordSummaryLabel.textContent = 'Gebruik e-mail en wachtwoord';
+        passwordSummaryHint.textContent = 'Alternatieve inlogmethode';
+        hero.insertBefore(passwordDetails, loginForm);
+
+        if (loginForm.parentElement !== passwordDetails) {
+          passwordDetails.appendChild(loginForm);
+        }
+
+        var usernameInput = loginForm.querySelector('#username');
+        var hasLoginState = Boolean(loginForm.querySelector('.alert')) || Boolean(usernameInput && normalizeText(usernameInput.value));
+        if (hasLoginState) {
+          passwordDetails.setAttribute('open', 'open');
+        } else {
+          passwordDetails.removeAttribute('open');
+        }
+
+        hero.classList.add('prudai-login-prioritised');
+        hero.dataset.prudaiSsoReady = 'true';
+        localizePrudaiLogin(loginRoot, authProviders);
+      }
+
+      function initializePrudaiInterfaceEnhancements() {
+        var scheduled = false;
+        var runEnhancements = function() {
+          scheduled = false;
+          prioritizePrudaiSso();
+          dockPrudaiTicketBottomBar();
+        };
+
+        var scheduleEnhancements = function() {
+          if (scheduled) return;
+          scheduled = true;
+
+          if (window.requestAnimationFrame) {
+            window.requestAnimationFrame(runEnhancements);
+          } else {
+            window.setTimeout(runEnhancements, 16);
+          }
+        };
+
+        scheduleEnhancements();
+
+        var observer = new MutationObserver(function() {
+          scheduleEnhancements();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializePrudaiInterfaceEnhancements, { once: true });
+      } else {
+        initializePrudaiInterfaceEnhancements();
+      }
+    })();
   <% end -%>
   <% if Rails.configuration.assets.debug %>
     <%= javascript_include_tag "application", nonce: true %>
