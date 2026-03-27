@@ -582,7 +582,7 @@ footer:has(a[href='https://zammad.org']) {
   width: 172px;
   height: 44px;
   margin-right: 18px;
-  background: url('/assets/prudai-logo.png?v=20260327-7') center/contain no-repeat;
+  background: url('/assets/prudai-logo.png?v=20260327-8') center/contain no-repeat;
 }
 
 .navigation,
@@ -687,7 +687,7 @@ footer:has(a[href='https://zammad.org']) {
   width: 132px !important;
   height: 36px !important;
   margin: 0 12px 0 12px !important;
-  background: url('/assets/prudai-logo.png?v=20260327-7') center/contain no-repeat !important;
+  background: url('/assets/prudai-logo.png?v=20260327-8') center/contain no-repeat !important;
 }
 
 .search .logo .icon-logo {
@@ -790,7 +790,7 @@ footer:has(a[href='https://zammad.org']) {
 }
 
 .article-add .articleNewEdit-body:empty::before {
-  content: 'Schrijf hier een interne notitie of antwoord...';
+  content: 'Schrijf hier je bericht...';
   color: #94a3b8;
 }
 
@@ -807,6 +807,19 @@ footer:has(a[href='https://zammad.org']) {
   color: #64748b !important;
 }
 
+.article-new.prudai-chat-thread {
+  width: min(940px, calc(100% - 40px));
+  margin: 0 auto;
+}
+
+.article-add.prudai-chat-composer .article-attachment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px !important;
+}
+
 .article-add.is-internal .article-attachment {
   border-top-color: #dbeafe !important;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(248, 250, 252, 0.98) 100%) !important;
@@ -817,6 +830,11 @@ footer:has(a[href='https://zammad.org']) {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.article-add.prudai-chat-composer .attachmentPlaceholder,
+.article-add.prudai-chat-composer .attachmentUpload {
+  flex: 1 1 220px;
 }
 
 .article-add .attachmentPlaceholder-hint {
@@ -837,22 +855,72 @@ footer:has(a[href='https://zammad.org']) {
 
 .prudai-ticket-bottombar {
   position: static !important;
+  inset: auto !important;
   z-index: auto !important;
+  display: flex !important;
+  align-items: center !important;
   height: auto !important;
   min-height: 0 !important;
   justify-content: flex-end !important;
-  padding: 12px 0 0 !important;
+  width: auto !important;
+  max-width: 100%;
+  margin-left: auto !important;
+  padding: 0 !important;
   border-top: 0 !important;
   background: transparent !important;
+  box-shadow: none !important;
   gap: 12px !important;
 }
 
-.prudai-ticket-bottombar button {
-  border-radius: 16px !important;
+.prudai-ticket-bottombar,
+.prudai-ticket-bottombar > div,
+.prudai-ticket-bottombar .footer-group {
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  flex-wrap: wrap;
 }
 
 .prudai-ticket-bottombar > div:first-child {
-  margin-right: auto !important;
+  margin-right: 0 !important;
+}
+
+.prudai-ticket-bottombar button,
+.prudai-ticket-bottombar a,
+.prudai-ticket-bottombar [role='button'] {
+  min-height: 42px;
+  padding: 0 16px !important;
+  border-radius: 14px !important;
+  border: 1px solid #dbe3ee !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  color: #64748b !important;
+  box-shadow: none !important;
+}
+
+.prudai-ticket-bottombar .js-submit,
+.prudai-ticket-bottombar button[class*='submit'],
+.prudai-ticket-bottombar a[class*='submit'] {
+  min-width: 112px;
+  border-color: var(--prudai-primary) !important;
+  background: linear-gradient(135deg, var(--prudai-primary) 0%, var(--prudai-primary-light) 100%) !important;
+  color: #ffffff !important;
+  font-weight: 700;
+  box-shadow: 0 16px 28px rgba(52, 92, 243, 0.18) !important;
+}
+
+.prudai-ticket-bottombar .js-submit:hover,
+.prudai-ticket-bottombar button[class*='submit']:hover,
+.prudai-ticket-bottombar a[class*='submit']:hover {
+  background: linear-gradient(135deg, var(--prudai-primary-dark) 0%, var(--prudai-primary) 100%) !important;
+  box-shadow: 0 18px 32px rgba(52, 92, 243, 0.24) !important;
+}
+
+.prudai-ticket-bottombar button:not(.js-submit):hover,
+.prudai-ticket-bottombar a:not(.js-submit):hover,
+.prudai-ticket-bottombar [role='button']:hover {
+  border-color: #c7d2fe !important;
+  background: #eef2ff !important;
+  color: var(--prudai-primary) !important;
 }
 
 img[src*='product_logo'],

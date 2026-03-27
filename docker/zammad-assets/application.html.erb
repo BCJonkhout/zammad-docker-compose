@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width">
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="color-scheme" content="light" />
-  <% prudai_asset_version = ENV.fetch('PRUDAI_ASSET_VERSION', '20260327-7') %>
+  <% prudai_asset_version = ENV.fetch('PRUDAI_ASSET_VERSION', '20260327-8') %>
   <title><%= Setting.get('product_name') %></title>
   <link rel="icon" type="image/png" sizes="32x32" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/prudai-favicon.png?v=<%= prudai_asset_version %>" />
@@ -61,6 +61,40 @@
 
           node.textContent = replacements[current];
         });
+      }
+
+      function isVisibleElement(node) {
+        return Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+      }
+
+      function setButtonLikeText(node, text) {
+        if (!node) return;
+
+        var label = Array.prototype.find.call(node.querySelectorAll('span, div'), function(child) {
+          return child.children.length === 0 && normalizeText(child.textContent);
+        });
+
+        if (label) {
+          label.textContent = text;
+          return;
+        }
+
+        var updated = false;
+        Array.prototype.forEach.call(node.childNodes, function(child) {
+          if (updated || child.nodeType !== Node.TEXT_NODE) return;
+          if (!normalizeText(child.textContent)) return;
+
+          child.textContent = ' ' + text + ' ';
+          updated = true;
+        });
+
+        if (!updated) {
+          node.textContent = text;
+        }
+      }
+
+      function findVisibleNode(selectors) {
+        return Array.prototype.find.call(document.querySelectorAll(selectors), isVisibleElement) || null;
       }
 
       function localizePrudaiLogin(loginRoot, authProviders) {
@@ -145,23 +179,62 @@
         if (!bottomBar) return;
 
         replaceExactText(bottomBar, {
-          'Stay on tab': 'Blijf op tabblad',
-          'Update': 'Bijwerken',
-          'Discard your unsaved changes': 'Verwerp niet-opgeslagen wijzigingen'
+          'Stay on tab': 'Na verzenden',
+          'Blijf op tabblad': 'Na verzenden',
+          'Update': 'Send',
+          'Bijwerken': 'Send',
+          'Discard your unsaved changes': 'Discard draft',
+          'Verwerp niet-opgeslagen wijzigingen': 'Discard draft'
         });
+
+        var submitButton = bottomBar.querySelector('.js-submit') || Array.prototype.find.call(bottomBar.querySelectorAll('button, a'), function(node) {
+          return /^(update|bijwerken|send)$/i.test(normalizeText(node.textContent));
+        });
+        if (submitButton) {
+          setButtonLikeText(submitButton, 'Send');
+        }
+
+        var postSendMode = Array.prototype.find.call(bottomBar.querySelectorAll('button, a, [role="button"], span, div'), function(node) {
+          var current = normalizeText(node.textContent);
+          return current === 'Stay on tab' || current === 'Blijf op tabblad';
+        });
+        if (postSendMode) {
+          setButtonLikeText(postSendMode, 'Na verzenden');
+        }
+      }
+
+      function findPrudaiTicketComposer() {
+        return findVisibleNode('.active.content .article-add, .article-new .article-add, .article-add');
+      }
+
+      function findPrudaiTicketBottomBar(editor) {
+        var scope = editor && (editor.closest('.active.content') || editor.closest('.content')) || document;
+
+        return Array.prototype.find.call(scope.querySelectorAll('footer, [class*="footer"]'), function(node) {
+          if (!isVisibleElement(node)) return false;
+          if (editor && editor.contains(node)) return false;
+
+          var text = normalizeText(node.textContent);
+          return Boolean(node.querySelector('.js-submit')) || /stay on tab|blijf op tabblad|update|bijwerken|send/i.test(text);
+        }) || null;
       }
 
       function dockPrudaiTicketBottomBar() {
-        var editor = document.querySelector('.article-add');
-        var bottomBar = document.querySelector('footer.sticky.z-30');
+        var editor = findPrudaiTicketComposer();
+        var bottomBar = findPrudaiTicketBottomBar(editor);
+        var attachmentBar = editor && editor.querySelector('.article-attachment');
 
-        if (!editor || !bottomBar) return;
+        if (!editor || !bottomBar || !attachmentBar) return;
 
+        editor.classList.add('prudai-chat-composer');
+        if (editor.closest('.article-new')) {
+          editor.closest('.article-new').classList.add('prudai-chat-thread');
+        }
         bottomBar.classList.add('prudai-ticket-bottombar');
         localizePrudaiTicketComposer(bottomBar);
 
-        if (editor.nextElementSibling !== bottomBar) {
-          editor.insertAdjacentElement('afterend', bottomBar);
+        if (bottomBar.parentElement !== attachmentBar) {
+          attachmentBar.appendChild(bottomBar);
         }
       }
 
