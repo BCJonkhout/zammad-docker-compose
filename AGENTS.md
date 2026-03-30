@@ -9,6 +9,13 @@ This guide applies inside the `zammad/` repository.
 - The goal is to let customers self-serve or receive fast AI help first, while escalating to human staff when the AI detects risk, security, billing, account-access, outage, or insufficient documentation coverage.
 - The public service health page for PrudAI is `https://status.prudai.com`.
 
+## Playwright SSO Testing
+
+- Use `codex@prudai.com` as the default Playwright login for PrudAI SSO browser testing.
+- Read credentials from the local-only file `/root/.codex/secrets/playwright-codex.env`.
+- Do not store the password in repo files, tests, fixtures, or commits.
+- Save refreshed Playwright storage state files under `/root/.codex/secrets/` when you need an authenticated browser session.
+
 ## Main Services
 
 - `zammad-railsserver`, `zammad-scheduler`, `zammad-websocket`, and `zammad-nginx` run the core Zammad app.
