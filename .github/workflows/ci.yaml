@@ -31,7 +31,7 @@ jobs:
       - name: Lint code base
         uses: github/super-linter/slim@v7
         env:
-          DEFAULT_BRANCH: master
+          DEFAULT_BRANCH: main
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINTER_RULES_PATH: .github/linters
           VALIDATE_ALL_CODEBASE: false
