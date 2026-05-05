@@ -35,7 +35,7 @@ discover_sendgrid_api_key() {
 
   for candidate in \
     "${ROOT_DIR}/.env.local" \
-    "/root/alex/.env" \
+    "/root/platform-backend/.env" \
     "/root/Prudai/odoo-careers/.env"
   do
     key="$(read_env_file_value "${candidate}" "SENDGRID_API_KEY" || true)"
