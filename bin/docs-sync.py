@@ -84,6 +84,31 @@ def getenv(name: str) -> str:
     return value
 
 
+def maybe_docs_bearer() -> str | None:
+    """Optional Keycloak service-account token so the crawl can read docs pages
+    that sit behind Keycloak SSO. Returns None (unchanged behaviour) unless both
+    DOCS_KC_BOT_CLIENT_ID and DOCS_KC_BOT_CLIENT_SECRET are configured."""
+    client_id = os.getenv("DOCS_KC_BOT_CLIENT_ID", "").strip()
+    client_secret = os.getenv("DOCS_KC_BOT_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        return None
+    issuer = os.getenv("DOCS_KC_ISSUER", "https://login.prudai.com/realms/prudai").strip().rstrip("/")
+    response = requests.post(
+        f"{issuer}/protocol/openid-connect/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    token = str(response.json().get("access_token") or "")
+    if not token:
+        raise RuntimeError("Keycloak returned no access_token for the docs service account.")
+    return token
+
+
 def normalize_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -772,6 +797,9 @@ def fetch_docs_tree(base_url: str, language: str) -> tuple[dict[tuple[str, ...],
             "User-Agent": DOCS_USER_AGENT,
         }
     )
+    bearer = maybe_docs_bearer()
+    if bearer:
+        session.headers["Authorization"] = f"Bearer {bearer}"
     sidebar_path = "/en/_sidebar.md" if language == "en" else "/_sidebar.md"
     sidebar = session.get(f"{base_url.rstrip('/')}{sidebar_path}", timeout=30)
     sidebar.raise_for_status()
