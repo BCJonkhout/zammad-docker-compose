@@ -8,6 +8,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -27,11 +28,11 @@ SOURCE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 ANCHOR_OPEN_RE = re.compile(r"<a\b[^>]*href=\"([^\"]+)\"[^>]*>", re.IGNORECASE)
+SELF_LINK_RE = re.compile(r"<a href=\"([^\"]+)\">([^<]*)</a>", re.IGNORECASE)
 CODE_LINK_RE = re.compile(r"<code>\s*<a\b[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>\s*</code>", re.IGNORECASE | re.DOTALL)
 INLINE_RE = re.compile(
     r"(`[^`]+`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(__(.+?)__)|(\*([^*]+)\*)|(_([^_]+)_)"
 )
-LINK_RE = re.compile(r"\[([^\]]+)\]\((\/[^)]*)\)")
 
 
 @dataclass(frozen=True)
@@ -123,19 +124,40 @@ def normalize_body_for_compare(value: str) -> str:
         lambda match: f'<a href="{html.escape(html.unescape(match.group(1)), quote=True)}">',
         normalized_code_links,
     )
-    normalized_tag_spacing = re.sub(r">\s+<", "><", normalized_anchors)
-    return normalize_whitespace(normalized_tag_spacing)
+    # Zammad auto-links bare URLs in the stored body, so text that we send as
+    # plain "https://..." comes back as <a href="https://...">https://...</a>.
+    # Collapse such self-labelled anchors on both sides, otherwise every run
+    # sees a difference and re-PATCHes an unchanged article forever.
+    normalized_self_links = SELF_LINK_RE.sub(
+        lambda match: match.group(2) if html.unescape(match.group(1)) == html.unescape(match.group(2).strip()) else match.group(0),
+        normalized_anchors,
+    )
+    normalized_tag_spacing = re.sub(r">\s+<", "><", normalized_self_links)
+    # Zammad stores the body with HTML entities resolved (&quot; -> "), so
+    # compare on unescaped text.  Comparison-only: the body that is written is
+    # always the freshly rendered one.
+    return normalize_whitespace(html.unescape(normalized_tag_spacing))
 
 
 def to_markdown_path(language: str, route_path: str) -> str:
+    """Map a docs route onto its raw-markdown endpoint.
+
+    Since the Docsify -> Astro Starlight migration (2026-05-24) the docs site
+    serves raw markdown from ``src/pages/[...slug].md.ts``: every page is
+    ``/<slug>.md``, the Dutch home page is ``/index.md`` and the English home
+    page is ``/en.md``.  Starlight routes carry a trailing slash
+    (``/getting-started/``), which has to be dropped first.
+    """
     clean_route = str(route_path or "").strip().split("#", 1)[0].split("?", 1)[0]
+    if clean_route != "/":
+        clean_route = clean_route.rstrip("/")
     if language == "en":
-        if clean_route in {"/en", "/en/"}:
-            return "/en/README.md"
+        if clean_route in {"", "/", "/en"}:
+            return "/en.md"
         normalized = clean_route if clean_route.startswith("/en/") else f"/en/{clean_route.lstrip('/')}"
         return normalized if normalized.endswith(".md") else f"{normalized}.md"
     if clean_route in {"", "/"}:
-        return "/README.md"
+        return "/index.md"
     if clean_route.startswith("/en/"):
         raise RuntimeError(f"Dutch route must not include /en/: {clean_route}")
     return clean_route if clean_route.endswith(".md") else f"{clean_route}.md"
@@ -274,6 +296,27 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
     return "\n".join(output)
 
 
+def strip_frontmatter(markdown_text: str) -> str:
+    """Drop the leading YAML frontmatter block emitted by the Starlight .md route.
+
+    ``src/pages/[...slug].md.ts`` prefixes every page with its serialized
+    frontmatter (title/description/template/...).  Without stripping it the
+    block would end up as literal text at the top of every KB article.
+    """
+    text = markdown_text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text.lstrip("﻿").startswith("---"):
+        return markdown_text
+    stripped = text.lstrip("﻿")
+    lines = stripped.split("\n")
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            remainder = lines[index + 1 :]
+            while remainder and not remainder[0].strip():
+                remainder.pop(0)
+            return "\n".join(remainder)
+    return markdown_text
+
+
 def strip_duplicate_leading_heading(title: str, markdown_text: str) -> str:
     lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     first_content_index: int | None = None
@@ -303,48 +346,129 @@ def strip_duplicate_leading_heading(title: str, markdown_text: str) -> str:
     return "\n".join(stripped_lines)
 
 
-def build_sidebar(language: str, base_url: str, sidebar_markdown: str) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef]]:
+class DocsIndexError(RuntimeError):
+    """The docs site no longer exposes a readable page index at the expected URL."""
+
+
+class StarlightSidebarParser(HTMLParser):
+    """Extract the navigation tree from a rendered Astro Starlight page.
+
+    Starlight renders the whole sidebar into every page as
+    ``<ul class="top-level">`` containing one ``<li><details>`` per group; the
+    group label sits in ``<span class="group-label">`` and each page is an
+    ``<a href="/route/">``.  Groups may nest, so ``<details>`` drives a stack.
+    Only structural hooks are used (``top-level``, ``group-label``,
+    ``details``); the hashed ``astro-*`` classes change on every build and are
+    deliberately ignored.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.entries: list[tuple[str, tuple[str, ...], str, str]] = []
+        self._stack: list[str] = []
+        self._active = False
+        self._ul_depth = 0
+        self._label_depth = 0
+        self._label_buf: list[str] = []
+        self._link_href: str | None = None
+        self._link_buf: list[str] = []
+
+    @staticmethod
+    def _classes(attrs: list[tuple[str, str | None]]) -> set[str]:
+        for key, value in attrs:
+            if key == "class" and value:
+                return set(value.split())
+        return set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        classes = self._classes(attrs)
+        if tag == "ul":
+            if "top-level" in classes and not self._active:
+                self._active = True
+                self._ul_depth = 1
+            elif self._active:
+                self._ul_depth += 1
+            return
+        if not self._active:
+            return
+        if tag == "span" and "group-label" in classes and not self._label_depth:
+            self._label_depth = 1
+            self._label_buf = []
+            return
+        if self._label_depth:
+            if tag == "span":
+                self._label_depth += 1
+            return
+        if tag == "a" and self._link_href is None:
+            self._link_href = dict(attrs).get("href")
+            self._link_buf = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._active:
+            return
+        if self._label_depth:
+            if tag != "span":
+                return
+            self._label_depth -= 1
+            if not self._label_depth:
+                label = normalize_whitespace("".join(self._label_buf))
+                if label:
+                    self._stack.append(label)
+                    self.entries.append(("group", tuple(self._stack), "", label))
+            return
+        if tag == "a" and self._link_href is not None:
+            title = normalize_whitespace("".join(self._link_buf))
+            self.entries.append(("link", tuple(self._stack), self._link_href, title))
+            self._link_href = None
+            return
+        if tag == "details":
+            if self._stack:
+                self._stack.pop()
+            return
+        if tag == "ul":
+            self._ul_depth -= 1
+            if self._ul_depth <= 0:
+                self._active = False
+
+    def handle_data(self, data: str) -> None:
+        if not self._active:
+            return
+        if self._label_depth:
+            self._label_buf.append(data)
+        elif self._link_href is not None:
+            self._link_buf.append(data)
+
+
+def parse_sidebar_nav(index_url: str, page_html: str) -> list[tuple[str, tuple[str, ...], str, str]]:
+    parser = StarlightSidebarParser()
+    parser.feed(page_html)
+    entries = parser.entries
+    if not any(kind == "link" for kind, *_ in entries):
+        raise DocsIndexError(
+            f"De documentatiesite heeft geen leesbare index meer op {index_url} — "
+            "de pagina laadde wel (HTTP 200), maar bevat geen herkenbare navigatieboom "
+            "(<ul class=\"top-level\"> met paginalinks). Structuur gewijzigd? "
+            "Controleer de sidebar van de docs-generator (Astro Starlight) en werk "
+            "parse_sidebar_nav() in docs-sync.py bij."
+        )
+    return entries
+
+
+def build_sidebar(
+    language: str,
+    base_url: str,
+    nav_entries: list[tuple[str, tuple[str, ...], str, str]],
+) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef]]:
     categories: dict[tuple[str, ...], CategoryDef] = {}
     pages: list[PageDef] = []
     category_order: dict[tuple[str, ...], int] = defaultdict(int)
     page_order: dict[tuple[str, ...], int] = defaultdict(int)
-    stack: list[str] = []
+    seen_slugs: set[str] = set()
 
-    for raw_line in sidebar_markdown.splitlines():
-        match = re.match(r"^(\s*)-\s+(.+?)\s*$", raw_line)
-        if not match:
-            continue
-
-        indent = len(match.group(1).replace("\t", "  "))
-        depth = indent // 2
-        content = normalize_whitespace(match.group(2))
-        stack = stack[:depth]
-
-        link_match = LINK_RE.search(content)
-        if link_match:
-            title = normalize_whitespace(link_match.group(1))
-            route_path = normalize_whitespace(link_match.group(2))
-            category_path = tuple(stack)
-            pages.append(
-                PageDef(
-                    language=language,
-                    title=title,
-                    slug=to_slug(language, route_path),
-                    markdown_path=to_markdown_path(language, route_path),
-                    page_url=to_page_url(base_url, language, to_slug(language, route_path)),
-                    category_path=category_path,
-                    order=page_order[category_path],
-                )
-            )
-            page_order[category_path] += 1
-            continue
-
-        title = normalize_whitespace(re.sub(r"[*_`]+", "", content))
-        if not title:
-            continue
-
-        path = tuple(stack + [title])
-        if path not in categories:
+    for kind, path, href, title in nav_entries:
+        if kind == "group":
+            if path in categories:
+                continue
             parent_path = path[:-1]
             categories[path] = CategoryDef(
                 path=path,
@@ -353,10 +477,30 @@ def build_sidebar(language: str, base_url: str, sidebar_markdown: str) -> tuple[
                 order=category_order[parent_path],
             )
             category_order[parent_path] += 1
-        stack.append(title)
+            continue
+
+        route_path = normalize_whitespace(href)
+        if not route_path.startswith("/"):
+            continue
+        slug = to_slug(language, route_path)
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        pages.append(
+            PageDef(
+                language=language,
+                title=title,
+                slug=slug,
+                markdown_path=to_markdown_path(language, route_path),
+                page_url=to_page_url(base_url, language, slug),
+                category_path=path,
+                order=page_order[path],
+            )
+        )
+        page_order[path] += 1
 
     if not pages:
-        raise RuntimeError(f"No documentation pages discovered for language {language}.")
+        raise DocsIndexError(f"No documentation pages discovered for language {language}.")
 
     return categories, pages
 
@@ -789,7 +933,9 @@ def update_or_create_answer(
         )
 
 
-def fetch_docs_tree(base_url: str, language: str) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef], dict[str, str]]:
+def fetch_docs_tree(
+    base_url: str, language: str
+) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef], dict[str, str], set[str]]:
     session = requests.Session()
     session.headers.update(
         {
@@ -800,18 +946,61 @@ def fetch_docs_tree(base_url: str, language: str) -> tuple[dict[tuple[str, ...],
     bearer = maybe_docs_bearer()
     if bearer:
         session.headers["Authorization"] = f"Bearer {bearer}"
-    sidebar_path = "/en/_sidebar.md" if language == "en" else "/_sidebar.md"
-    sidebar = session.get(f"{base_url.rstrip('/')}{sidebar_path}", timeout=30)
-    sidebar.raise_for_status()
-    categories, pages = build_sidebar(language, base_url, sidebar.text)
+    index_path = "/en/" if language == "en" else "/"
+    index_url = f"{base_url.rstrip('/')}{index_path}"
+    try:
+        index_response = session.get(index_url, timeout=30)
+    except requests.RequestException as exc:
+        raise DocsIndexError(
+            f"De documentatiesite is niet bereikbaar op {index_url} ({exc.__class__.__name__}: {exc}). "
+            "Zonder index kan de paginaboom niet worden bepaald."
+        ) from exc
+    if index_response.status_code != 200:
+        raise DocsIndexError(
+            f"De documentatiesite heeft geen leesbare index meer op {index_url} "
+            f"(HTTP {index_response.status_code}) — structuur gewijzigd? "
+            "De paginaboom wordt gelezen uit de gerenderde Starlight-navigatie op deze pagina; "
+            "controleer of de URL nog bestaat en werk fetch_docs_tree() in docs-sync.py bij."
+        )
+
+    nav_entries = parse_sidebar_nav(index_url, index_response.text)
+    categories, pages = build_sidebar(language, base_url, nav_entries)
 
     markdown_by_slug: dict[str, str] = {}
+    kept_pages: list[PageDef] = []
+    skipped_slugs: set[str] = set()
     for page in pages:
-        response = session.get(f"{base_url.rstrip('/')}{page.markdown_path}", timeout=30)
-        response.raise_for_status()
-        markdown_by_slug[page.slug] = response.text
+        page_md_url = f"{base_url.rstrip('/')}{page.markdown_path}"
+        response = session.get(page_md_url, timeout=30)
+        if response.status_code in (401, 403) and not bearer:
+            # SSO-gated "competitive edge" page (see gated-pages.json on the docs
+            # site). Without DOCS_KC_* credentials it cannot be read; skip it
+            # instead of failing the whole run, and keep any existing KB article.
+            print(
+                f"[docs-sync] {language}: sla SSO-afgeschermde pagina '{page.slug}' over "
+                f"(HTTP {response.status_code} op {page_md_url}). "
+                "Stel DOCS_KC_ISSUER/DOCS_KC_BOT_CLIENT_ID + ZAMMAD_DOCS_KC_SECRET_FILE in "
+                "om deze pagina wel te synchroniseren.",
+                file=sys.stderr,
+            )
+            skipped_slugs.add(page.slug)
+            continue
+        if response.status_code != 200:
+            raise DocsIndexError(
+                f"Documentatiepagina '{page.slug}' ({language}) is niet leesbaar op {page_md_url} "
+                f"(HTTP {response.status_code}) — structuur gewijzigd? "
+                "De ruwe markdown komt van de Starlight-route src/pages/[...slug].md.ts; "
+                "controleer to_markdown_path() in docs-sync.py."
+            )
+        markdown_by_slug[page.slug] = strip_frontmatter(response.text)
+        kept_pages.append(page)
 
-    return categories, pages, markdown_by_slug
+    if not markdown_by_slug:
+        raise DocsIndexError(
+            f"Geen enkele documentatiepagina kon worden gelezen voor taal {language} via {index_url}."
+        )
+
+    return categories, kept_pages, markdown_by_slug, skipped_slugs
 
 
 def ensure_categories(
@@ -1019,7 +1208,7 @@ def reorder_answers(
 
 
 def sync_language(client: ZammadClient, kb_id: int, language: str, docs_base_url: str) -> None:
-    category_defs, pages, markdown_by_slug = fetch_docs_tree(docs_base_url, language)
+    category_defs, pages, markdown_by_slug, skipped_slugs = fetch_docs_tree(docs_base_url, language)
     assets = get_kb_snapshot(client, kb_id)
     kb_locale_id = get_kb_locale_id(assets, kb_id)
 
@@ -1029,7 +1218,9 @@ def sync_language(client: ZammadClient, kb_id: int, language: str, docs_base_url
     categories_by_id, _ = build_category_state(assets, kb_locale_id, kb_id)
     answers_by_id, _ = build_answer_state(assets, kb_locale_id, allowed_category_ids=set(categories_by_id))
     answers_by_slug, answers_by_title_category = index_answers_for_language(answers_by_id, language)
-    desired_slugs = {page.slug for page in pages}
+    # Pages that could not be read (SSO-gated) stay in the "keep" set so an
+    # already-published article is never deleted just because it is unreadable.
+    desired_slugs = {page.slug for page in pages} | skipped_slugs
 
     for page in sorted(pages, key=lambda item: (item.category_path, item.order)):
         category_id = path_to_category_id.get(page.category_path)
@@ -1085,6 +1276,12 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except DocsIndexError as exc:
+        # Structural change on the docs site: report it in plain language and
+        # fail (exit 1) so the systemd unit goes red -- but without the bare
+        # stacktrace that kept this failure unreadable for weeks.
+        print(f"[docs-sync] FOUT: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         raise
