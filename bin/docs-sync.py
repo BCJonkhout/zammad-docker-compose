@@ -19,6 +19,11 @@ DOCS_USER_AGENT = "prudai-zammad-docs-sync/1.0"
 DOCS_MARKER_PREFIX = "docs-slug-"
 DOCS_MANAGED_TAG = "managed-by-docs-sync"
 DOCS_LANG_TAG_PREFIX = "docs-lang-"
+# Deletion floor: a run may prune a couple of genuinely removed pages, but a
+# bulk deletion means the navigation was read incompletely -- fail instead.
+DELETE_FLOOR_MIN = 2
+DELETE_FLOOR_RATIO = 0.10
+DELETE_OVERRIDE_ENV = "DOCS_SYNC_ALLOW_DELETE"
 DOCS_METADATA_RE = re.compile(
     r"<!--\s*managed-by-docs-sync\s+lang:(?P<lang>[a-z]{2})\s+slug:(?P<slug>[^ ]+)\s+source:(?P<source>[^ ]+)\s*-->",
     re.IGNORECASE,
@@ -1054,6 +1059,39 @@ def ensure_categories(
     return path_to_id
 
 
+def deletion_allowance(existing_count: int) -> int:
+    """How many managed objects a single run may delete before it must stop.
+
+    The page tree comes from scraped HTML, so a partially-parsed navigation
+    looks exactly like "those pages were removed from the docs" and would prune
+    live KB articles.  A run is allowed to clean up a couple of genuinely
+    removed pages, but a bulk deletion is treated as a parsing accident.
+    """
+    return max(DELETE_FLOOR_MIN, int(existing_count * DELETE_FLOOR_RATIO))
+
+
+def guard_deletions(kind: str, kb_id: int, doomed: list[str], existing_count: int) -> None:
+    allowance = deletion_allowance(existing_count)
+    if len(doomed) <= allowance:
+        return
+    if os.environ.get(DELETE_OVERRIDE_ENV) == "1":
+        print(
+            f"[docs-sync] LET OP: {len(doomed)} {kind} worden verwijderd in KB {kb_id} "
+            f"(boven de drempel van {allowance}) omdat {DELETE_OVERRIDE_ENV}=1 is gezet.",
+            file=sys.stderr,
+        )
+        return
+    raise DocsIndexError(
+        f"Afgebroken vóór verwijderen: de sync wilde {len(doomed)} van {existing_count} "
+        f"{kind} verwijderen in KB {kb_id}, meer dan de drempel van {allowance}. "
+        "Dat wijst op een onvolledig gelezen navigatie op de documentatiesite, niet op "
+        f"echt verwijderde pagina's. Betrokken: {', '.join(doomed[:15])}"
+        f"{' …' if len(doomed) > 15 else ''}. "
+        "Klopt het dat deze pagina's echt weg zijn? Draai dan eenmalig met "
+        f"{DELETE_OVERRIDE_ENV}=1. Er is niets verwijderd."
+    )
+
+
 def delete_stale_answers(
     client: ZammadClient,
     kb_id: int,
@@ -1061,18 +1099,29 @@ def delete_stale_answers(
     desired_slugs: set[str],
     answers_by_id: dict[int, AnswerState],
 ) -> None:
+    doomed: list[AnswerState] = []
     for answer in sorted(answers_by_id.values(), key=lambda item: item.id):
         if not answer.managed:
             continue
         if answer.language and answer.language != language:
-            client.request(
-                "DELETE",
-                f"/api/v1/knowledge_bases/{kb_id}/answers/{answer.id}",
-                expected=(200,),
-            )
+            doomed.append(answer)
             continue
         if answer.slug and answer.slug in desired_slugs:
             continue
+        doomed.append(answer)
+
+    if not doomed:
+        return
+
+    managed_total = sum(1 for answer in answers_by_id.values() if answer.managed)
+    guard_deletions(
+        "artikelen",
+        kb_id,
+        [answer.slug or answer.title for answer in doomed],
+        managed_total,
+    )
+
+    for answer in doomed:
         client.request(
             "DELETE",
             f"/api/v1/knowledge_bases/{kb_id}/answers/{answer.id}",
@@ -1102,9 +1151,18 @@ def delete_stale_categories(
         return path
 
     ordered = sorted(categories_by_id.values(), key=lambda item: (-len(build_path(item.id)), item.id))
-    for category in ordered:
-        if build_path(category.id) in desired_category_paths:
-            continue
+    doomed = [category for category in ordered if build_path(category.id) not in desired_category_paths]
+    if not doomed:
+        return
+
+    guard_deletions(
+        "categorieën",
+        kb_id,
+        [category.title for category in doomed],
+        len(categories_by_id),
+    )
+
+    for category in doomed:
         client.request(
             "DELETE",
             f"/api/v1/knowledge_bases/{kb_id}/categories/{category.id}",
