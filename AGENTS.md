@@ -44,6 +44,31 @@ This guide applies inside the `zammad/` repository.
   - `bin/run-docs-sync.sh`
   - `systemd/zammad-docs-sync.service`
   - `systemd/zammad-docs-sync.timer`
+- Tests: `/usr/bin/python3 bin/test_docs_sync.py` (network-free). `DOCS_SYNC_PATH=<kopie>`
+  points the suite at a mutated copy — that is how the non-vacuity probe is run.
+
+#### What the KB sanitizer does to your HTML (verified against Zammad 7.0.0)
+
+Answer bodies are sanitized server-side on save (`config/initializers/html_sanitizer.rb`
+plus `KnowledgeBase::Answer::Translation::Content#sanitize_body`). There is no bypass —
+the API and the UI go through the same `before_save`. Four traps that have already cost
+time here:
+
+- **Remote images are deleted, not just blocked.** `Scrubber::Wipe#remove_unsafe_src`
+  removes any element whose `src` starts with `http`, `ftp` or `//`. An
+  `<img src="https://docs.prudai.com/...">` disappears *including its alt text*. A
+  relative `src` survives but resolves against support.prudai.com, which 404s. The only
+  way to show a picture inline is a base64 `data:` URI, which Zammad converts into a real
+  attachment. `docs-sync.py` therefore renders `![alt](src)` as a labelled link.
+- **The autolinker rewrites URLs inside `<code>`.** `scrubber/link.rb` skips only `<a>`
+  and `<pre>`, and `URI.extract` stops at the first `<`, so a URL containing a placeholder
+  comes back as an anchor covering only part of the code span. Any body comparison must
+  ignore anchor tags inside `<code>` or the article is re-written on every run.
+- **`class` is limited to `js-signatureMarker` / `yahoo_quoted` / `zammad-table`**, and
+  every `id` is stripped. Use `class="zammad-table"` on tables — without it they render
+  borderless in the portal.
+- **`<span>` is unwrapped in KB content** (unlike ticket articles): `RemoveLineBreaks`
+  runs on this path only. Use `<strong>`/`<em>`, never a span.
 
 ### Ticket flow
 
