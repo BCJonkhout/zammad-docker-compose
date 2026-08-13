@@ -34,10 +34,30 @@ SOURCE_URL_RE = re.compile(
 )
 ANCHOR_OPEN_RE = re.compile(r"<a\b[^>]*href=\"([^\"]+)\"[^>]*>", re.IGNORECASE)
 SELF_LINK_RE = re.compile(r"<a href=\"([^\"]+)\">([^<]*)</a>", re.IGNORECASE)
-CODE_LINK_RE = re.compile(r"<code>\s*<a\b[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>\s*</code>", re.IGNORECASE | re.DOTALL)
+CODE_SPAN_RE = re.compile(r"<code>(.*?)</code>", re.IGNORECASE | re.DOTALL)
+ANCHOR_TAG_RE = re.compile(r"</?a\b[^>]*>", re.IGNORECASE)
+# Inline spans, matched left-to-right.  Order matters: "image" must precede
+# "link", otherwise "![alt](src)" is matched from the "[" onwards and the "!"
+# survives as literal text -- the loose exclamation marks that were visible on
+# 22 knowledge-base pages.  Named groups keep the alternation readable.
 INLINE_RE = re.compile(
-    r"(`[^`]+`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(__(.+?)__)|(\*([^*]+)\*)|(_([^_]+)_)"
+    r"(?P<code>`[^`]+`)"
+    r"|(?P<image>!\[(?P<img_alt>[^\]]*)\]\(\s*(?P<img_src>[^)\s]+)(?:\s+\"(?P<img_title>[^\"]*)\")?\s*\))"
+    r"|(?P<link>\[(?P<link_label>[^\]]+)\]\((?P<link_href>[^)]+)\))"
+    r"|(?P<strong_a>\*\*(?P<strong_a_text>[^*]+)\*\*)"
+    r"|(?P<strong_b>__(?P<strong_b_text>.+?)__)"
+    r"|(?P<em_a>\*(?P<em_a_text>[^*]+)\*)"
+    r"|(?P<em_b>_(?P<em_b_text>[^_]+)_)"
 )
+# Block-level constructs.
+LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[-*+]|\d+[.)])[ \t]+(?P<text>\S.*?)\s*$")
+HR_RE = re.compile(r"^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$")
+HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
+BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
+FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*(?P<info>.*)$")
+# A table delimiter cell: "---", ":---", "---:" or ":---:".  Two dashes minimum
+# so a lone "-" (a list bullet) can never be mistaken for one.
+TABLE_DELIM_CELL_RE = re.compile(r"^:?-{2,}:?$")
 
 
 @dataclass(frozen=True)
@@ -93,25 +113,46 @@ def getenv(name: str) -> str:
 def maybe_docs_bearer() -> str | None:
     """Optional Keycloak service-account token so the crawl can read docs pages
     that sit behind Keycloak SSO. Returns None (unchanged behaviour) unless both
-    DOCS_KC_BOT_CLIENT_ID and DOCS_KC_BOT_CLIENT_SECRET are configured."""
+    DOCS_KC_BOT_CLIENT_ID and DOCS_KC_BOT_CLIENT_SECRET are configured.
+
+    The docs gate (marketing/docs/middleware.ts) accepts a realm-signed RS256
+    bearer whose ``azp`` is in its DOCS_BOT_CLIENT_IDS allow-list; no audience or
+    role is checked.  So the client here must be one of those client ids --
+    ``prudai-docs-bot`` is the existing one.
+
+    A failure to mint the token is never fatal: the 4 gated pages are then
+    skipped with a warning, exactly as when no credentials are configured at
+    all.  Letting it raise would take all 48 readable pages down with it.
+    """
     client_id = os.getenv("DOCS_KC_BOT_CLIENT_ID", "").strip()
     client_secret = os.getenv("DOCS_KC_BOT_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
         return None
     issuer = os.getenv("DOCS_KC_ISSUER", "https://login.prudai.com/realms/prudai").strip().rstrip("/")
-    response = requests.post(
-        f"{issuer}/protocol/openid-connect/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    token = str(response.json().get("access_token") or "")
-    if not token:
-        raise RuntimeError("Keycloak returned no access_token for the docs service account.")
+    try:
+        response = requests.post(
+            f"{issuer}/protocol/openid-connect/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        token = str(response.json().get("access_token") or "")
+        if not token:
+            raise RuntimeError("Keycloak returned no access_token.")
+    except Exception as exc:  # noqa: BLE001 - degrade to "no bearer", never abort the sync
+        print(
+            f"[docs-sync] WAARSCHUWING: kon geen service-account token ophalen bij {issuer} "
+            f"voor client '{client_id}' ({exc.__class__.__name__}: {exc}). "
+            "De SSO-afgeschermde pagina's worden overgeslagen; de rest van de sync gaat door. "
+            "Controleer DOCS_KC_BOT_CLIENT_ID/DOCS_KC_BOT_CLIENT_SECRET (OpenBao "
+            "kv/prod/zammad/app) en of de client in realm 'prudai' service accounts aan heeft.",
+            file=sys.stderr,
+        )
+        return None
     return token
 
 
@@ -121,8 +162,17 @@ def normalize_whitespace(value: str) -> str:
 
 def normalize_body_for_compare(value: str) -> str:
     without_comments = re.sub(r"<!--.*?-->", "", str(value or ""), flags=re.DOTALL)
-    normalized_code_links = CODE_LINK_RE.sub(
-        lambda match: f"<code>{match.group(2).strip()}</code>",
+    # Zammad's autolinker rewrites bare URLs inside <code> (scrubber/link.rb
+    # skips only <a> and <pre>, not <code>), and it stops at the first "<", so a
+    # URL containing a placeholder comes back as a *partial* anchor:
+    #   <code>https://login.prudai.com/realms/</code>   ->
+    #   <code><a href="...">https://login...realms/</a>&lt;realm&gt;/broker/...</code>
+    # Matching only anchors that fill the whole <code> therefore missed these and
+    # re-PATCHed the same article every night.  We never emit anchors inside
+    # <code> ourselves, so dropping every anchor tag within a code span makes the
+    # comparison symmetric regardless of what the autolinker did.
+    normalized_code_links = CODE_SPAN_RE.sub(
+        lambda match: f"<code>{ANCHOR_TAG_RE.sub('', match.group(1)).strip()}</code>",
         without_comments,
     )
     normalized_anchors = ANCHOR_OPEN_RE.sub(
@@ -198,105 +248,296 @@ def resolve_docs_link(base_url: str, href: str) -> str:
     return urljoin(f"{base_url.rstrip('/')}/", href)
 
 
+def render_link(href: str, label: str) -> str:
+    return (
+        f'<a href="{html.escape(href, quote=True)}" target="_blank" rel="noopener noreferrer">'
+        f"{html.escape(label)}</a>"
+    )
+
+
+def render_image(base_url: str, src: str, alt: str) -> str:
+    """Render a markdown image as a labelled link to the screenshot.
+
+    NOT an ``<img>``, and deliberately so.  Zammad's knowledge-base sanitizer
+    (``lib/html_sanitizer/scrubber/wipe.rb#remove_unsafe_src``) *deletes* any
+    element whose ``src`` starts with ``http``, ``ftp`` or ``//`` -- the node is
+    removed outright, so an ``<img src="https://docs.prudai.com/...">`` would
+    silently disappear together with its alt text.  A relative ``src`` survives
+    the sanitizer but resolves against support.prudai.com, which 404s (verified:
+    /assets/screenshots/... returns 404 there and 200 on docs.prudai.com), so
+    that only trades an invisible image for a broken-image icon.
+
+    The only way to show the picture inline would be to inline it as a base64
+    ``data:`` URI, which Zammad converts into a real ``cid:`` attachment.  That
+    is ~6.6 MB of screenshots for this docs set, written by a nightly cron, and
+    any instability in the body comparison would re-upload all of them every
+    night -- so it is a deliberate product decision, not a rendering detail.
+
+    A link keeps every bit of information (the alt text becomes the label, the
+    screenshot stays one click away) and cannot break.
+    """
+    return render_link(resolve_docs_link(base_url, src.strip()), alt.strip())
+
+
 def render_inline(base_url: str, text: str) -> str:
     output: list[str] = []
     last = 0
     for match in INLINE_RE.finditer(text):
         output.append(html.escape(text[last : match.start()]))
-        token = match.group(0)
-        if token.startswith("`"):
-            output.append(f"<code>{html.escape(token[1:-1])}</code>")
-        elif match.group(2):
-            label = match.group(3) or ""
-            href = resolve_docs_link(base_url, match.group(4) or "")
+        if match.group("code"):
+            output.append(f"<code>{html.escape(match.group('code')[1:-1])}</code>")
+        elif match.group("image"):
             output.append(
-                f'<a href="{html.escape(href, quote=True)}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a>'
+                render_image(base_url, match.group("img_src") or "", match.group("img_alt") or "")
             )
-        elif match.group(5) or match.group(7):
-            strong_text = match.group(6) or match.group(8) or ""
+        elif match.group("link"):
+            output.append(
+                render_link(
+                    resolve_docs_link(base_url, match.group("link_href") or ""),
+                    match.group("link_label") or "",
+                )
+            )
+        elif match.group("strong_a") or match.group("strong_b"):
+            strong_text = match.group("strong_a_text") or match.group("strong_b_text") or ""
             output.append(f"<strong>{html.escape(strong_text)}</strong>")
         else:
-            em_text = match.group(10) or match.group(12) or ""
+            em_text = match.group("em_a_text") or match.group("em_b_text") or ""
             output.append(f"<em>{html.escape(em_text)}</em>")
         last = match.end()
     output.append(html.escape(text[last:]))
     return "".join(output)
 
 
+def split_table_row(line: str) -> list[str]:
+    """Split one markdown table row into its cells, honouring escaped pipes."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith("\\|"):
+        stripped = stripped[:-1]
+    return [cell.replace("\\|", "|").strip() for cell in re.split(r"(?<!\\)\|", stripped)]
+
+
+def is_table_delimiter(line: str) -> bool:
+    """True for the ``| --- | :---: |`` row that turns the line above into a table.
+
+    A pipe is required, which is what keeps a bare ``---`` (a horizontal rule,
+    and the frontmatter fence) from being mistaken for a one-column table.
+    """
+    if "|" not in line:
+        return False
+    cells = split_table_row(line)
+    return bool(cells) and all(TABLE_DELIM_CELL_RE.match(cell) for cell in cells)
+
+
+def column_alignments(delimiter_line: str) -> list[str | None]:
+    """Read ``:---`` / ``---:`` / ``:---:`` markers into CSS text-align values."""
+    alignments: list[str | None] = []
+    for cell in split_table_row(delimiter_line):
+        left = cell.startswith(":")
+        right = cell.endswith(":")
+        if left and right:
+            alignments.append("center")
+        elif right:
+            alignments.append("right")
+        elif left:
+            alignments.append("left")
+        else:
+            alignments.append(None)
+    return alignments
+
+
+def render_table(base_url: str, header_line: str, delimiter_line: str, body_lines: list[str]) -> str:
+    """Render a GitHub-flavoured markdown table.
+
+    ``class="zammad-table"`` is the one class Zammad's knowledge-base sanitizer
+    keeps (its allowlist is ``js-signatureMarker``/``yahoo_quoted``/
+    ``zammad-table``), and it is what gives the table its borders in the portal
+    -- a bare <table> renders without any.  ``text-align`` on th/td is likewise
+    inside the sanitizer's CSS allowlist.
+    """
+    alignments = column_alignments(delimiter_line)
+
+    def cell(tag: str, value: str, index: int) -> str:
+        align = alignments[index] if index < len(alignments) else None
+        style = f' style="text-align:{align}"' if align else ""
+        return f"<{tag}{style}>{render_inline(base_url, value)}</{tag}>"
+
+    parts = ['<table class="zammad-table">', "<thead>", "<tr>"]
+    parts += [cell("th", value, index) for index, value in enumerate(split_table_row(header_line))]
+    parts += ["</tr>", "</thead>"]
+    if body_lines:
+        parts.append("<tbody>")
+        for line in body_lines:
+            parts.append("<tr>")
+            parts += [cell("td", value, index) for index, value in enumerate(split_table_row(line))]
+            parts.append("</tr>")
+        parts.append("</tbody>")
+    parts.append("</table>")
+    return "".join(parts)
+
+
+def render_list_block(base_url: str, items: list[tuple[int, str, str]]) -> str:
+    """Render a run of list items, nesting deeper-indented ones inside their parent.
+
+    ``items`` is (indent, "ul"|"ol", text).  A deeper indent opens a sub-list
+    *inside* the still-open <li> above it; a shallower one closes back out.  The
+    previous renderer ignored indentation entirely, so a sub-list closed its
+    parent <ol> and the next top-level step restarted numbering at 1.
+    """
+    parts: list[str] = []
+    stack: list[tuple[int, str]] = []
+    for indent, tag, text in items:
+        if not stack:
+            parts.append(f"<{tag}>")
+            stack.append((indent, tag))
+        elif indent > stack[-1][0]:
+            # Deeper: nest inside the <li> that is still open above.
+            parts.append(f"<{tag}>")
+            stack.append((indent, tag))
+        else:
+            parts.append("</li>")
+            while len(stack) > 1 and indent < stack[-1][0]:
+                parts.append(f"</{stack[-1][1]}>")
+                stack.pop()
+                parts.append("</li>")
+            if stack[-1][1] != tag:
+                parts.append(f"</{stack[-1][1]}>")
+                stack.pop()
+                parts.append(f"<{tag}>")
+                stack.append((indent, tag))
+        parts.append(f"<li>{render_inline(base_url, text)}")
+    while stack:
+        parts.append("</li>")
+        parts.append(f"</{stack[-1][1]}>")
+        stack.pop()
+    return "".join(parts)
+
+
+def starts_new_block(line: str) -> bool:
+    """True if this line opens a block that a paragraph/quote must not swallow."""
+    if not line.strip():
+        return True
+    return bool(
+        HR_RE.match(line)
+        or HEADING_RE.match(line)
+        or BLOCKQUOTE_RE.match(line)
+        or FENCE_RE.match(line)
+        or LIST_ITEM_RE.match(line.rstrip())
+    )
+
+
 def markdown_to_html(base_url: str, markdown_text: str) -> str:
+    """Convert docs markdown into the HTML subset Zammad's KB sanitizer keeps.
+
+    Block constructs are consumed with lookahead (a table needs to see its
+    delimiter row, a list its indentation), so this walks an index rather than
+    streaming line by line.
+    """
     lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     output: list[str] = []
-    paragraph: list[str] = []
-    code_lines: list[str] = []
-    in_code_block = False
-    current_list: str | None = None
+    index = 0
+    total = len(lines)
 
-    def flush_paragraph() -> None:
-        nonlocal paragraph
-        if not paragraph:
-            return
-        text = " ".join(part.strip() for part in paragraph if part.strip())
+    while index < total:
+        line = lines[index].rstrip()
+
+        if not line.strip():
+            index += 1
+            continue
+
+        fence = FENCE_RE.match(line)
+        if fence:
+            closing = fence.group(1)[0] * 3
+            code_lines: list[str] = []
+            index += 1
+            while index < total and not lines[index].strip().startswith(closing):
+                code_lines.append(lines[index].rstrip())
+                index += 1
+            index += 1  # step over the closing fence (or off the end)
+            output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+            continue
+
+        if HR_RE.match(line):
+            output.append("<hr>")
+            index += 1
+            continue
+
+        heading = HEADING_RE.match(line)
+        if heading:
+            level = len(heading.group(1))
+            output.append(f"<h{level}>{render_inline(base_url, heading.group(2))}</h{level}>")
+            index += 1
+            continue
+
+        if BLOCKQUOTE_RE.match(line):
+            quoted: list[str] = []
+            while index < total:
+                current = lines[index].rstrip()
+                marker = BLOCKQUOTE_RE.match(current)
+                if marker:
+                    quoted.append(marker.group(1))
+                    index += 1
+                    continue
+                # Lazy continuation: a plain text line keeps the quote going,
+                # but a heading/list/table must not be swallowed by it.
+                if quoted and current.strip() and not starts_new_block(current):
+                    quoted.append(current.strip())
+                    index += 1
+                    continue
+                break
+            output.append(f"<blockquote>{markdown_to_html(base_url, chr(10).join(quoted))}</blockquote>")
+            continue
+
+        if "|" in line and index + 1 < total and is_table_delimiter(lines[index + 1]):
+            header_line = line
+            delimiter_line = lines[index + 1]
+            index += 2
+            body_lines: list[str] = []
+            while index < total and lines[index].strip() and "|" in lines[index]:
+                body_lines.append(lines[index])
+                index += 1
+            output.append(render_table(base_url, header_line, delimiter_line, body_lines))
+            continue
+
+        if LIST_ITEM_RE.match(line):
+            items: list[tuple[int, str, str]] = []
+            while index < total:
+                current = lines[index].rstrip()
+                item = LIST_ITEM_RE.match(current)
+                if item:
+                    items.append(
+                        (
+                            len(item.group("indent").expandtabs(4)),
+                            "ol" if item.group("marker")[-1] in ".)" else "ul",
+                            item.group("text"),
+                        )
+                    )
+                    index += 1
+                    continue
+                # An indented plain line continues the item above it (the docs
+                # use this for the italic metadata line under each source).
+                if items and current.strip() and current[:1] in (" ", "\t"):
+                    indent, tag, text = items[-1]
+                    items[-1] = (indent, tag, f"{text} {current.strip()}")
+                    index += 1
+                    continue
+                break
+            output.append(render_list_block(base_url, items))
+            continue
+
+        paragraph: list[str] = []
+        while index < total:
+            current = lines[index].rstrip()
+            if starts_new_block(current):
+                break
+            if "|" in current and index + 1 < total and is_table_delimiter(lines[index + 1]):
+                break
+            paragraph.append(current.strip())
+            index += 1
+        text = " ".join(part for part in paragraph if part)
         if text:
             output.append(f"<p>{render_inline(base_url, text)}</p>")
-        paragraph = []
-
-    def close_list() -> None:
-        nonlocal current_list
-        if current_list:
-            output.append(f"</{current_list}>")
-            current_list = None
-
-    for raw_line in lines:
-        line = raw_line.rstrip()
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            flush_paragraph()
-            close_list()
-            if in_code_block:
-                output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
-                code_lines = []
-                in_code_block = False
-            else:
-                in_code_block = True
-            continue
-
-        if in_code_block:
-            code_lines.append(line)
-            continue
-
-        if not stripped:
-            flush_paragraph()
-            close_list()
-            continue
-
-        heading_match = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$", line)
-        if heading_match:
-            flush_paragraph()
-            close_list()
-            level = len(heading_match.group(1))
-            output.append(f"<h{level}>{render_inline(base_url, heading_match.group(2))}</h{level}>")
-            continue
-
-        list_match = re.match(r"^\s*([-*]|\d+\.)\s+(.+?)\s*$", line)
-        if list_match:
-            flush_paragraph()
-            target_list = "ol" if list_match.group(1).endswith(".") else "ul"
-            if current_list != target_list:
-                close_list()
-                output.append(f"<{target_list}>")
-                current_list = target_list
-            output.append(f"<li>{render_inline(base_url, list_match.group(2))}</li>")
-            continue
-
-        if current_list:
-            close_list()
-        paragraph.append(line)
-
-    flush_paragraph()
-    close_list()
-    if in_code_block:
-        output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
 
     return "\n".join(output)
 
@@ -977,17 +1218,33 @@ def fetch_docs_tree(
     for page in pages:
         page_md_url = f"{base_url.rstrip('/')}{page.markdown_path}"
         response = session.get(page_md_url, timeout=30)
-        if response.status_code in (401, 403) and not bearer:
+        if response.status_code in (401, 403):
             # SSO-gated "competitive edge" page (see gated-pages.json on the docs
-            # site). Without DOCS_KC_* credentials it cannot be read; skip it
-            # instead of failing the whole run, and keep any existing KB article.
-            print(
-                f"[docs-sync] {language}: sla SSO-afgeschermde pagina '{page.slug}' over "
-                f"(HTTP {response.status_code} op {page_md_url}). "
-                "Stel DOCS_KC_ISSUER/DOCS_KC_BOT_CLIENT_ID + ZAMMAD_DOCS_KC_SECRET_FILE in "
-                "om deze pagina wel te synchroniseren.",
-                file=sys.stderr,
-            )
+            # site). Skip it instead of failing the whole run, and keep any
+            # existing KB article -- an unreadable page must never cost us the
+            # other 48, nor get itself pruned as "removed from the docs".
+            if bearer:
+                # Credentials ARE configured and the gate still says no: the
+                # token is valid but its azp is not in the docs middleware's
+                # DOCS_BOT_CLIENT_IDS allow-list, or the client lost access.
+                # Loud, actionable -- but still not fatal.
+                print(
+                    f"[docs-sync] WAARSCHUWING: {language}: '{page.slug}' blijft afgeschermd "
+                    f"ondanks een service-account token (HTTP {response.status_code} op {page_md_url}). "
+                    "Het token is geldig maar wordt door de docs-gate geweigerd: zet de client-id "
+                    "van DOCS_KC_BOT_CLIENT_ID in de env-var DOCS_BOT_CLIENT_IDS van het Vercel-"
+                    "project 'prudai-docs' (comma-separated) en deploy die opnieuw. "
+                    "Pagina overgeslagen; bestaand KB-artikel blijft staan.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[docs-sync] {language}: sla SSO-afgeschermde pagina '{page.slug}' over "
+                    f"(HTTP {response.status_code} op {page_md_url}). "
+                    "Stel DOCS_KC_BOT_CLIENT_ID + DOCS_KC_BOT_CLIENT_SECRET in "
+                    "om deze pagina wel te synchroniseren.",
+                    file=sys.stderr,
+                )
             skipped_slugs.add(page.slug)
             continue
         if response.status_code != 200:
