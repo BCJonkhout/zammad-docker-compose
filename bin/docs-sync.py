@@ -36,6 +36,7 @@ ANCHOR_OPEN_RE = re.compile(r"<a\b[^>]*href=\"([^\"]+)\"[^>]*>", re.IGNORECASE)
 SELF_LINK_RE = re.compile(r"<a href=\"([^\"]+)\">([^<]*)</a>", re.IGNORECASE)
 CODE_SPAN_RE = re.compile(r"<code>(.*?)</code>", re.IGNORECASE | re.DOTALL)
 ANCHOR_TAG_RE = re.compile(r"</?a\b[^>]*>", re.IGNORECASE)
+STYLE_ATTR_RE = re.compile(r'\s+style="([^"]*)"', re.IGNORECASE)
 # Inline spans, matched left-to-right.  Order matters: "image" must precede
 # "link", otherwise "![alt](src)" is matched from the "[" onwards and the "!"
 # survives as literal text -- the loose exclamation marks that were visible on
@@ -55,9 +56,10 @@ HR_RE = re.compile(r"^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$")
 HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
 BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*(?P<info>.*)$")
-# A table delimiter cell: "---", ":---", "---:" or ":---:".  Two dashes minimum
-# so a lone "-" (a list bullet) can never be mistaken for one.
-TABLE_DELIM_CELL_RE = re.compile(r"^:?-{2,}:?$")
+# A table delimiter cell: "---", ":---", "---:", ":---:" and the short ":-:"
+# forms.  A colon-less cell needs two dashes so a lone "-" (a list bullet, or a
+# cell that literally contains a dash) can never be mistaken for one.
+TABLE_DELIM_CELL_RE = re.compile(r"^(?::-+:?|-+:|-{2,})$")
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,16 @@ def normalize_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _canonical_style(match: re.Match[str]) -> str:
+    """Reduce a style attribute to `prop:value;prop:value` with no whitespace."""
+    declarations = [
+        re.sub(r"\s*:\s*", ":", declaration.strip())
+        for declaration in match.group(1).split(";")
+        if declaration.strip()
+    ]
+    return f' style="{";".join(declarations)}"' if declarations else ""
+
+
 def normalize_body_for_compare(value: str) -> str:
     without_comments = re.sub(r"<!--.*?-->", "", str(value or ""), flags=re.DOTALL)
     # Zammad's autolinker rewrites bare URLs inside <code> (scrubber/link.rb
@@ -187,7 +199,12 @@ def normalize_body_for_compare(value: str) -> str:
         lambda match: match.group(2) if html.unescape(match.group(1)) == html.unescape(match.group(2).strip()) else match.group(0),
         normalized_anchors,
     )
-    normalized_tag_spacing = re.sub(r">\s+<", "><", normalized_self_links)
+    # Zammad rewrites style declarations rather than storing them verbatim: its
+    # clear_style re-serialises "text-align:left" as "text-align:left;".  Compare
+    # on a canonical form (no spaces, no empty or trailing declarations) so a
+    # cosmetic difference never re-PATCHes an otherwise unchanged article.
+    normalized_styles = STYLE_ATTR_RE.sub(_canonical_style, normalized_self_links)
+    normalized_tag_spacing = re.sub(r">\s+<", "><", normalized_styles)
     # Zammad stores the body with HTML entities resolved (&quot; -> "), so
     # compare on unescaped text.  Comparison-only: the body that is written is
     # always the freshly rendered one.
@@ -360,7 +377,11 @@ def render_table(base_url: str, header_line: str, delimiter_line: str, body_line
 
     def cell(tag: str, value: str, index: int) -> str:
         align = alignments[index] if index < len(alignments) else None
-        style = f' style="text-align:{align}"' if align else ""
+        # Trailing semicolon on purpose: Zammad's clear_style re-serialises the
+        # declaration as "text-align:left;" and a body that differs from what is
+        # stored gets re-PATCHed every night.  normalize_body_for_compare also
+        # normalises style attributes, so this stays correct if that ever changes.
+        style = f' style="text-align:{align};"' if align else ""
         return f"<{tag}{style}>{render_inline(base_url, value)}</{tag}>"
 
     parts = ['<table class="zammad-table">', "<thead>", "<tr>"]
@@ -427,6 +448,16 @@ def starts_new_block(line: str) -> bool:
     )
 
 
+def opens_table(lines: list[str], index: int) -> bool:
+    """True if lines[index] is a table header row (its successor is the delimiter)."""
+    return (
+        0 <= index < len(lines)
+        and "|" in lines[index]
+        and index + 1 < len(lines)
+        and is_table_delimiter(lines[index + 1])
+    )
+
+
 def markdown_to_html(base_url: str, markdown_text: str) -> str:
     """Convert docs markdown into the HTML subset Zammad's KB sanitizer keeps.
 
@@ -440,6 +471,7 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
     total = len(lines)
 
     while index < total:
+        block_start = index
         line = lines[index].rstrip()
 
         if not line.strip():
@@ -481,7 +513,12 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
                     continue
                 # Lazy continuation: a plain text line keeps the quote going,
                 # but a heading/list/table must not be swallowed by it.
-                if quoted and current.strip() and not starts_new_block(current):
+                if (
+                    quoted
+                    and current.strip()
+                    and not starts_new_block(current)
+                    and not opens_table(lines, index)
+                ):
                     quoted.append(current.strip())
                     index += 1
                     continue
@@ -489,12 +526,17 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
             output.append(f"<blockquote>{markdown_to_html(base_url, chr(10).join(quoted))}</blockquote>")
             continue
 
-        if "|" in line and index + 1 < total and is_table_delimiter(lines[index + 1]):
+        if opens_table(lines, index):
             header_line = line
             delimiter_line = lines[index + 1]
             index += 2
             body_lines: list[str] = []
-            while index < total and lines[index].strip() and "|" in lines[index]:
+            while (
+                index < total
+                and lines[index].strip()
+                and "|" in lines[index]
+                and not starts_new_block(lines[index])
+            ):
                 body_lines.append(lines[index])
                 index += 1
             output.append(render_table(base_url, header_line, delimiter_line, body_lines))
@@ -516,8 +558,16 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
                     index += 1
                     continue
                 # An indented plain line continues the item above it (the docs
-                # use this for the italic metadata line under each source).
-                if items and current.strip() and current[:1] in (" ", "\t"):
+                # use this for the italic metadata line under each source).  It
+                # must not swallow an indented heading, fence, quote or table --
+                # those still open a block of their own.
+                if (
+                    items
+                    and current.strip()
+                    and current[:1] in (" ", "\t")
+                    and not starts_new_block(current)
+                    and not opens_table(lines, index)
+                ):
                     indent, tag, text = items[-1]
                     items[-1] = (indent, tag, f"{text} {current.strip()}")
                     index += 1
@@ -529,15 +579,22 @@ def markdown_to_html(base_url: str, markdown_text: str) -> str:
         paragraph: list[str] = []
         while index < total:
             current = lines[index].rstrip()
-            if starts_new_block(current):
-                break
-            if "|" in current and index + 1 < total and is_table_delimiter(lines[index + 1]):
+            if starts_new_block(current) or opens_table(lines, index):
                 break
             paragraph.append(current.strip())
             index += 1
         text = " ".join(part for part in paragraph if part)
         if text:
             output.append(f"<p>{render_inline(base_url, text)}</p>")
+
+        # Every branch above must consume at least one line.  If a future edit
+        # ever adds one that does not, this loop would spin forever on a live
+        # sync; fail loudly instead of hanging the nightly job.
+        if index == block_start:
+            raise RuntimeError(
+                f"markdown_to_html maakte geen voortgang op regel {index + 1}: {lines[index]!r}. "
+                "Een blokvertakking consumeert geen enkele regel — dat is een bug in de parser."
+            )
 
     return "\n".join(output)
 
@@ -1217,7 +1274,20 @@ def fetch_docs_tree(
     skipped_slugs: set[str] = set()
     for page in pages:
         page_md_url = f"{base_url.rstrip('/')}{page.markdown_path}"
-        response = session.get(page_md_url, timeout=30)
+        # No redirect-following: the markdown route is a fixed URL, so a 3xx
+        # means the gate (or a rename) is sending us somewhere else, and
+        # following it silently is how a login page ends up in the KB.
+        response = session.get(page_md_url, timeout=30, allow_redirects=False)
+        if response.status_code in (301, 302, 303, 307, 308):
+            print(
+                f"[docs-sync] WAARSCHUWING: {language}: '{page.slug}' stuurt door naar "
+                f"{response.headers.get('Location', '?')} (HTTP {response.status_code} op {page_md_url}). "
+                "Niet gevolgd — een redirect op de markdown-route betekent een gate of een "
+                "hernoemde pagina, geen inhoud. Pagina overgeslagen; bestaand artikel blijft staan.",
+                file=sys.stderr,
+            )
+            skipped_slugs.add(page.slug)
+            continue
         if response.status_code in (401, 403):
             # SSO-gated "competitive edge" page (see gated-pages.json on the docs
             # site). Skip it instead of failing the whole run, and keep any
@@ -1253,6 +1323,20 @@ def fetch_docs_tree(
                 f"(HTTP {response.status_code}) — structuur gewijzigd? "
                 "De ruwe markdown komt van de Starlight-route src/pages/[...slug].md.ts; "
                 "controleer to_markdown_path() in docs-sync.py."
+            )
+        # A 200 is not proof that we got markdown.  The SSO gate answers some
+        # Accept headers with an HTML login page at status 200, and a redirect
+        # can land anywhere; either would be published verbatim into a
+        # customer-facing KB article.  Demand a text/markdown-ish content type
+        # and refuse anything that looks like a rendered page.
+        content_type = str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+        if content_type not in ("text/markdown", "text/plain", "text/x-markdown", ""):
+            raise DocsIndexError(
+                f"Documentatiepagina '{page.slug}' ({language}) leverde {content_type or 'geen'} "
+                f"in plaats van markdown op {page_md_url} (HTTP {response.status_code}). "
+                "Dat is meestal een inlog- of foutpagina die met status 200 wordt geserveerd; "
+                "die mag niet in een klantgericht KB-artikel belanden. "
+                "Controleer de route src/pages/[...slug].md.ts op de documentatiesite."
             )
         markdown_by_slug[page.slug] = strip_frontmatter(response.text)
         kept_pages.append(page)
@@ -1355,10 +1439,20 @@ def delete_stale_answers(
     language: str,
     desired_slugs: set[str],
     answers_by_id: dict[int, AnswerState],
+    skipped_slugs: frozenset[str] | set[str] = frozenset(),
 ) -> None:
+    """Prune managed articles whose page is gone from the docs.
+
+    ``skipped_slugs`` names pages that exist but could not be *read* this run
+    (SSO-gated, or a redirect).  "Unreadable" must never be treated as
+    "removed", so the invariant is enforced here, at the point where the damage
+    would be done, and not only in the caller that builds ``desired_slugs``.
+    """
     doomed: list[AnswerState] = []
     for answer in sorted(answers_by_id.values(), key=lambda item: item.id):
         if not answer.managed:
+            continue
+        if answer.slug and answer.slug in skipped_slugs:
             continue
         if answer.language and answer.language != language:
             doomed.append(answer)
@@ -1553,7 +1647,7 @@ def sync_language(client: ZammadClient, kb_id: int, language: str, docs_base_url
     categories_by_id, _ = build_category_state(assets, kb_locale_id, kb_id)
     allowed_category_ids = set(categories_by_id)
     answers_by_id, answers_by_slug = build_answer_state(assets, kb_locale_id, allowed_category_ids=allowed_category_ids)
-    delete_stale_answers(client, kb_id, language, desired_slugs, answers_by_id)
+    delete_stale_answers(client, kb_id, language, desired_slugs, answers_by_id, skipped_slugs)
     delete_stale_categories(client, kb_id, set(category_defs.keys()), kb_locale_id)
     reorder_categories(client, kb_id, kb_locale_id, category_defs)
 

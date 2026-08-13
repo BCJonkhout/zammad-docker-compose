@@ -564,6 +564,23 @@ env_path.write_text(
             f"ZAMMAD_DOCS_KB_NL_ID={result['kb_nl_id']}",
             f"ZAMMAD_DOCS_KB_EN_ID={result['kb_en_id']}",
             "ZAMMAD_DOCS_SYNC_TOKEN_FILE=/root/zammad/secrets/docs-sync.token",
+            "",
+            # Keep in step with docs-sync.env: this script rewrites that file
+            # wholesale, so anything documented only there is lost on the next
+            # provisioning run.
+            "# Keycloak service-account for the 4 SSO-gated docs pages (knowledge,",
+            "# knowledge-model, citations, research).  Do NOT set the credentials here:",
+            "# DOCS_KC_BOT_CLIENT_ID + DOCS_KC_BOT_CLIENT_SECRET come from OpenBao",
+            "# (kv/prod/zammad/app) and are rendered into /root/zammad/.env by `bao-fetch",
+            "# zammad`, which run-docs-sync.sh sources before this file.  OpenBao is the",
+            "# source of truth -- never hand-edit .env, it is replaced wholesale.",
+            "#",
+            "# The docs gate (marketing/docs/middleware.ts) only checks that the bearer is",
+            "# realm-signed and that its `azp` is in DOCS_BOT_CLIENT_IDS, which already",
+            "# contains `prudai-docs-bot` -- so reuse that existing client, no new one.",
+            "#",
+            "# Only override the issuer if the realm ever moves:",
+            "# DOCS_KC_ISSUER=https://login.prudai.com/realms/prudai",
         ]
     )
     + "\n",

@@ -222,6 +222,24 @@ class BodyCompareTests(unittest.TestCase):
         self.assertEqual(ds.normalize_body_for_compare(stored),
                          ds.normalize_body_for_compare("<p><code>www.example.com</code></p>"))
 
+    def test_table_alignment_survives_zammads_style_rewrite(self):
+        """Zammad's clear_style re-serialises text-align:left as 'text-align:left;'
+        (verified live against zammad 7.0.0's HtmlSanitizer).  Without normalising
+        style attributes that article differs every night and is re-written
+        forever -- the exact churn class this run already fixed once."""
+        generated = ds.markdown_to_html(DOCS, "| A | B |\n| :--- | ---: |\n| 1 | 2 |\n")
+        sanitized = generated.replace("text-align:left;", "text-align:left ;").replace(
+            "text-align:right;", "text-align: right"
+        )
+        self.assertEqual(ds.normalize_body_for_compare(sanitized),
+                         ds.normalize_body_for_compare(generated))
+
+    def test_a_different_alignment_is_still_detected(self):
+        left = ds.markdown_to_html(DOCS, "| A |\n| :--- |\n| 1 |\n")
+        right = ds.markdown_to_html(DOCS, "| A |\n| ---: |\n| 1 |\n")
+        self.assertNotEqual(ds.normalize_body_for_compare(left),
+                            ds.normalize_body_for_compare(right))
+
     def test_changed_code_content_is_still_detected(self):
         """Stripping anchors inside <code> must not blind the comparison."""
         self.assertNotEqual(
@@ -254,11 +272,22 @@ class TableTests(unittest.TestCase):
 
     def test_alignment_row_is_consumed_and_applied(self):
         out = ds.markdown_to_html(DOCS, "| A | B | C |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |\n")
-        self.assertIn('<th style="text-align:left">A</th>', out)
-        self.assertIn('<th style="text-align:center">B</th>', out)
-        self.assertIn('<th style="text-align:right">C</th>', out)
+        # Trailing semicolon matches how Zammad re-serialises the declaration.
+        self.assertIn('<th style="text-align:left;">A</th>', out)
+        self.assertIn('<th style="text-align:center;">B</th>', out)
+        self.assertIn('<th style="text-align:right;">C</th>', out)
         # The delimiter row must never surface as a data row.
         self.assertNotIn("---", out)
+
+    def test_short_alignment_markers_are_recognised(self):
+        out = ds.markdown_to_html(DOCS, "| A | B |\n|:-:|-:|\n| 1 | 2 |\n")
+        self.assertIn('<th style="text-align:center;">A</th>', out)
+        self.assertIn('<th style="text-align:right;">B</th>', out)
+        self.assertNotRegex(out, r"<(p|li)>[^<]*\|")
+
+    def test_a_row_of_single_dashes_is_not_a_delimiter(self):
+        """'| - | - |' is a data row, not an alignment row."""
+        self.assertFalse(ds.is_table_delimiter("| - | - |"))
 
     def test_table_carries_the_only_class_zammad_keeps(self):
         """Zammad's KB sanitizer allows exactly js-signatureMarker/yahoo_quoted/
@@ -430,27 +459,191 @@ class SanitizerContractTests(unittest.TestCase):
             self.assertEqual(klass, "zammad-table")
 
 
+class _Response:
+    def __init__(self, status=200, text="", headers=None):
+        self.status_code = status
+        self.text = text
+        self.headers = headers if headers is not None else {"Content-Type": "text/markdown"}
+
+
+class _StubSession:
+    """Stands in for requests.Session inside fetch_docs_tree."""
+
+    def __init__(self, router):
+        self.headers = {}
+        self._router = router
+        self.requested = []
+
+    def get(self, url, timeout=None, allow_redirects=True):
+        self.requested.append(url)
+        return self._router(url)
+
+
+class _RecordingClient:
+    """Stands in for ZammadClient; records calls instead of making them."""
+
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, path, **kwargs):
+        self.calls.append((method, path))
+        return {}
+
+    def deletes(self):
+        return [path for method, path in self.calls if method == "DELETE"]
+
+
+def _answer(answer_id, slug, language="nl", managed=True):
+    return ds.AnswerState(
+        id=answer_id, title=f"Titel {slug}", category_id=1, translation_id=answer_id,
+        content_id=answer_id, body="", tags=[], published=True, slug=slug,
+        language=language, source_url=None, managed=managed,
+    )
+
+
 class BearerSkipTests(unittest.TestCase):
-    """A configured-but-rejected bearer must skip the page, not kill the run."""
+    """A configured-but-rejected bearer must skip the page, not kill the run.
 
-    def test_gated_slugs_stay_in_the_keep_set(self):
-        """skipped_slugs feeds desired_slugs so an unreadable page is never pruned."""
-        source = open(MODULE_PATH).read()
-        self.assertIn("desired_slugs = {page.slug for page in pages} | skipped_slugs", source)
+    These assert behaviour.  An earlier version grepped the source for the line
+    that implements the rule, which passed happily when the rule was removed.
+    """
 
-    def test_401_is_never_fatal_even_with_a_bearer(self):
-        source = open(MODULE_PATH).read()
-        gated = source.split("if response.status_code in (401, 403)")[1].split("if response.status_code != 200")[0]
-        self.assertNotIn("raise", gated)
-        self.assertIn("skipped_slugs.add(page.slug)", gated)
-        # and it must say what to do about it
-        self.assertIn("DOCS_BOT_CLIENT_IDS", gated)
-
-    def test_token_failure_degrades_instead_of_aborting(self):
-        """No DOCS_KC_* configured -> None, and never an exception."""
-        for key in ("DOCS_KC_BOT_CLIENT_ID", "DOCS_KC_BOT_CLIENT_SECRET"):
+    def setUp(self):
+        for key in ("DOCS_KC_BOT_CLIENT_ID", "DOCS_KC_BOT_CLIENT_SECRET", "DOCS_KC_ISSUER"):
             os.environ.pop(key, None)
+        self._session = ds.requests.Session
+        self._post = ds.requests.post
+
+    def tearDown(self):
+        ds.requests.Session = self._session
+        ds.requests.post = self._post
+        for key in ("DOCS_KC_BOT_CLIENT_ID", "DOCS_KC_BOT_CLIENT_SECRET", "DOCS_KC_ISSUER"):
+            os.environ.pop(key, None)
+
+    def test_no_credentials_means_no_bearer(self):
         self.assertIsNone(ds.maybe_docs_bearer())
+
+    def test_unreachable_keycloak_degrades_to_none(self):
+        """WITH credentials configured: minting must fail soft, not abort the run."""
+        os.environ["DOCS_KC_BOT_CLIENT_ID"] = "prudai-docs-bot"
+        os.environ["DOCS_KC_BOT_CLIENT_SECRET"] = "geheim"
+
+        def explode(*args, **kwargs):
+            raise ds.requests.RequestException("keycloak onbereikbaar")
+
+        ds.requests.post = explode
+        self.assertIsNone(ds.maybe_docs_bearer())
+
+    def test_token_response_without_access_token_degrades_to_none(self):
+        os.environ["DOCS_KC_BOT_CLIENT_ID"] = "prudai-docs-bot"
+        os.environ["DOCS_KC_BOT_CLIENT_SECRET"] = "geheim"
+
+        class _TokenResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"error": "invalid_client"}
+
+        ds.requests.post = lambda *a, **k: _TokenResponse()
+        self.assertIsNone(ds.maybe_docs_bearer())
+
+    def _gated_tree(self):
+        def router(url):
+            if url.endswith("/"):
+                return _Response(200, SIDEBAR_HTML, {"Content-Type": "text/html"})
+            if url.endswith("/knowledge.md"):
+                return _Response(401, "", {"Content-Type": "text/html"})
+            return _Response(200, "# Kop\n\nTekst.\n")
+
+        session = _StubSession(router)
+        ds.requests.Session = lambda: session
+        return ds.fetch_docs_tree("https://docs.prudai.com", "nl")
+
+    def test_a_401_page_is_skipped_and_the_run_continues(self):
+        categories, pages, markdown, skipped = self._gated_tree()
+        self.assertEqual(skipped, {"knowledge"})
+        self.assertNotIn("knowledge", {page.slug for page in pages})
+        self.assertNotIn("knowledge", markdown)
+        # the other three pages still came through
+        self.assertEqual({page.slug for page in pages},
+                         {"README", "getting-started", "authentication"})
+
+    def test_a_skipped_page_is_never_pruned(self):
+        """The invariant that matters: unreadable != removed from the docs.
+
+        Deliberately does NOT put the skipped slug into desired_slugs -- if the
+        test builds the keep-set itself it passes even when the production code
+        stops building it, which is exactly how this test was vacuous before.
+        Here the skipped-set is the only thing standing between the article and
+        a DELETE.
+        """
+        _, pages, _, skipped = self._gated_tree()
+        readable_only = {page.slug for page in pages}
+        self.assertNotIn("knowledge", readable_only)
+
+        client = _RecordingClient()
+        ds.delete_stale_answers(client, 1, "nl", readable_only, {7: _answer(7, "knowledge")}, skipped)
+        self.assertEqual(client.deletes(), [], "een onleesbare pagina mag niet verwijderd worden")
+
+    def test_a_genuinely_removed_page_is_still_pruned(self):
+        """Counterpart, so the test above cannot pass by never deleting anything."""
+        client = _RecordingClient()
+        ds.delete_stale_answers(client, 1, "nl", {"README"}, {7: _answer(7, "weg-uit-de-docs")}, set())
+        self.assertEqual(client.deletes(), ["/api/v1/knowledge_bases/1/answers/7"])
+
+    def test_a_redirected_page_is_skipped_not_followed(self):
+        def router(url):
+            if url.endswith("/"):
+                return _Response(200, SIDEBAR_HTML, {"Content-Type": "text/html"})
+            if url.endswith("/knowledge.md"):
+                return _Response(302, "", {"Location": "https://login.prudai.com/"})
+            return _Response(200, "# Kop\n\nTekst.\n")
+
+        ds.requests.Session = lambda: _StubSession(router)
+        _, pages, _, skipped = ds.fetch_docs_tree("https://docs.prudai.com", "nl")
+        self.assertEqual(skipped, {"knowledge"})
+        self.assertNotIn("knowledge", {page.slug for page in pages})
+
+    def test_an_html_login_page_served_as_200_is_refused(self):
+        """A gate that answers 200 with HTML must not be published as an article."""
+        def router(url):
+            if url.endswith("/"):
+                return _Response(200, SIDEBAR_HTML, {"Content-Type": "text/html"})
+            if url.endswith("/knowledge.md"):
+                return _Response(200, "<html><body>Log in</body></html>", {"Content-Type": "text/html"})
+            return _Response(200, "# Kop\n\nTekst.\n")
+
+        ds.requests.Session = lambda: _StubSession(router)
+        with self.assertRaises(ds.DocsIndexError) as caught:
+            ds.fetch_docs_tree("https://docs.prudai.com", "nl")
+        self.assertIn("in plaats van markdown", str(caught.exception))
+
+
+class ParserInvariantTests(unittest.TestCase):
+    def test_every_block_branch_consumes_a_line(self):
+        """A branch that consumes nothing would hang the nightly sync forever."""
+        sample = (
+            "# Kop\n\ntekst\n\n> citaat\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n"
+            "- een\n  - genest\n\n```\ncode\n```\n\n---\n\n![alt](/a.png)\n"
+        )
+        self.assertTrue(ds.markdown_to_html(DOCS, sample))  # must return, not hang
+
+    def test_list_continuation_does_not_swallow_a_heading(self):
+        out = ds.markdown_to_html(DOCS, "- item\n  ## Kop\n")
+        self.assertIn("<h2>Kop</h2>", out)
+        self.assertNotIn("## Kop", out)
+
+    def test_list_continuation_does_not_swallow_a_code_fence(self):
+        out = ds.markdown_to_html(DOCS, "- item\n  ```\n  code\n  ```\n")
+        self.assertIn("<pre><code>", out)
+
+    def test_list_continuation_does_not_swallow_a_table(self):
+        out = ds.markdown_to_html(DOCS, "- item\n  | A | B |\n  | --- | --- |\n  | 1 | 2 |\n")
+        self.assertIn("<table", out)
+        self.assertNotRegex(out, r"<li>[^<]*\|")
 
 
 if __name__ == "__main__":

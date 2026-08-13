@@ -9,3 +9,4 @@ User=root
 WorkingDirectory=/root/zammad
 EnvironmentFile=/root/zammad/docs-sync.env
 ExecStart=/root/zammad/bin/run-docs-sync.sh
+RuntimeMaxSec=1800
