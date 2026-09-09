@@ -51,21 +51,28 @@ This guide applies inside the `zammad/` repository.
 
 #### SSO-afgeschermde docs-pagina's mogen NIET in de kennisbank
 
-De kennisbank op `support.prudai.com` is anoniem leesbaar en er is geen
-`robots.txt`. Een paar docs-pagina's staan juist achter Keycloak-SSO; die in de
-KB publiceren maakt de afscherming waardeloos (gemeten 09-09-2026: 8 artikelen
-anoniem HTTP 200). `docs-sync.py` slaat ze daarom over **bij het ontdekken** —
-ze worden niet eens opgehaald.
+De kennisbank op `support.prudai.com` is anoniem leesbaar. Een paar
+docs-pagina's staan juist achter Keycloak-SSO; die in de KB publiceren maakt de
+afscherming waardeloos (gemeten 09-09-2026: 8 artikelen anoniem HTTP 200).
+`docs-sync.py` slaat ze daarom over **bij het ontdekken** — ze worden niet eens
+opgehaald. Sinds 09-09-2026 serveert de host-nginx-vhost wél een `robots.txt`
+(`Disallow: /` + `Allow: /help` + `Allow: /assets/`, locatieblok in
+`nginx/support.prudai.com.conf`); dat vraagt nette crawlers om niet te
+indexeren en is géén afscherming — de KB blijft anoniem opvraagbaar.
 
 - Eén bron van waarheid: `/root/marketing/docs/gated-pages.json` in de docs-repo
   (override met `DOCS_GATED_PAGES_FILE`). Nooit een tweede lijst hier bijhouden.
 - Fail-closed: is die lijst onleesbaar, leeg of van de verkeerde vorm, dan stopt
   de sync met exit 1. De fout die we repareren is "publiceert te veel", dus een
   rode unit is de veilige kant.
-- Al gepubliceerde artikelen worden **niet** verwijderd of ingetrokken — dat is
-  een besluit van Beau. `bin/docs-sync-gated-report.py` toont in droogloop welke
-  artikelen het betreft, hun anonieme statuscode en wat intrekken zou doen
-  (archiveren, terug te draaien met één `unarchive`).
+- Al gepubliceerde artikelen worden door de sync **niet** verwijderd of
+  ingetrokken — dat is een besluit van Beau. `bin/docs-sync-gated-report.py`
+  toont in droogloop welke artikelen het betreft, hun anonieme statuscode en wat
+  intrekken zou doen (archiveren, terug te draaien met één `unarchive`).
+  Beau heeft dat besluit op 09-09-2026 genomen: de acht toen gepubliceerde
+  artikelen (nl 3/21/64/65, en 24/43/66/67) zijn gearchiveerd en geven anoniem
+  404. De sync kan ze niet terugzetten — `archived_at` komt in `docs-sync.py`
+  niet voor.
 
 #### What the KB sanitizer does to your HTML (verified against Zammad 7.0.0)
 

@@ -6,8 +6,10 @@ Why this exists
 ---------------
 docs.prudai.com puts a handful of competitive-edge pages behind Keycloak SSO
 (the list is ``gated-pages.json`` in the docs repo).  The Zammad knowledge base
-is anonymously readable and ``support.prudai.com/robots.txt`` is a 404, so an
-article synced from such a page hands out exactly what the gate protects.
+is anonymously readable, so an article synced from such a page hands out
+exactly what the gate protects.  Since 09-09-2026 ``support.prudai.com`` does
+serve a ``robots.txt`` (``Disallow: /`` with ``Allow: /help``), but that only
+asks well-behaved crawlers not to index -- it does not make anything private.
 ``docs-sync.py`` no longer publishes them, but articles that were already
 published stay where they are: withdrawing customer-facing production content
 is a human decision, not a side effect of a bug fix.
