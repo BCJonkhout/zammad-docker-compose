@@ -24,6 +24,16 @@ DOCS_LANG_TAG_PREFIX = "docs-lang-"
 DELETE_FLOOR_MIN = 2
 DELETE_FLOOR_RATIO = 0.10
 DELETE_OVERRIDE_ENV = "DOCS_SYNC_ALLOW_DELETE"
+# Every flag main() accepts. Anything else aborts (see main()).
+KNOWN_FLAGS = ("--dry-run", "--help", "-h")
+USAGE_EXIT_CODE = 2
+USAGE = (
+    "Gebruik: docs-sync.py [--dry-run]\n"
+    "  (geen vlag)  synchroniseert docs.prudai.com naar de Zammad-kennisbanken (schrijft!)\n"
+    "  --dry-run    leest alleen en rapporteert wat een sync zou doen\n"
+    "  --help, -h   deze uitleg\n"
+    "Omgeving: DOCS_SYNC_DRY_RUN=1 werkt als --dry-run."
+)
 # SSO-gated docs pages: docs.prudai.com puts a handful of competitive-edge
 # pages behind Keycloak.  The Zammad knowledge base is anonymously readable, so
 # publishing such a page there hands out exactly what the gate protects.  The
@@ -1835,8 +1845,27 @@ def dry_run(docs_base_url: str) -> int:
     return 0
 
 
-def main() -> int:
-    if "--dry-run" in sys.argv[1:] or os.getenv("DOCS_SYNC_DRY_RUN", "").strip() == "1":
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    # Argument validation, not decoration: without it a typo like `--dryrun`
+    # silently falls through to the live branch and runs a full write sync
+    # against the production knowledge bases. Unknown flag => stop, say why,
+    # exit non-zero.
+    unknown = [arg for arg in args if arg not in KNOWN_FLAGS]
+    if unknown:
+        print(
+            f"[docs-sync] Onbekende optie(s): {', '.join(unknown)}. "
+            f"Toegestaan: {', '.join(KNOWN_FLAGS)}. "
+            "Afgebroken zonder te synchroniseren -- een typefout (bijvoorbeeld '--dryrun' "
+            "in plaats van '--dry-run') mag geen volledige live-sync tegen de productie-"
+            "kennisbank starten.",
+            file=sys.stderr,
+        )
+        return USAGE_EXIT_CODE
+    if "--help" in args or "-h" in args:
+        print(USAGE)
+        return 0
+    if "--dry-run" in args or os.getenv("DOCS_SYNC_DRY_RUN", "").strip() == "1":
         return dry_run(getenv("ZAMMAD_DOCS_BASE_URL"))
     base_url = getenv("ZAMMAD_BASE_URL")
     docs_base_url = getenv("ZAMMAD_DOCS_BASE_URL")

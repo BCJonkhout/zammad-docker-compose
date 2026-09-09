@@ -10,6 +10,7 @@ knowledge base.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import re
 import shutil
@@ -956,6 +957,87 @@ class SkipSetComesFromTheListTests(unittest.TestCase):
             {4: _answer(4, "echt-verwijderd")}, skipped,
         )
         self.assertEqual(client.deletes(), ["/api/v1/knowledge_bases/1/answers/4"])
+
+
+class ArgumentValidationTests(unittest.TestCase):
+    """`--dryrun` must not run a live sync against production.
+
+    main() used to test for the exact string "--dry-run" and treat everything
+    else -- including a typo one character away from it -- as "no flag given",
+    i.e. the full write path against the production knowledge bases.
+    """
+
+    def setUp(self):
+        self._env = {}
+        for key in ("ZAMMAD_BASE_URL", "ZAMMAD_DOCS_BASE_URL", "ZAMMAD_DOCS_SYNC_TOKEN",
+                    "ZAMMAD_DOCS_KB_NL_ID", "ZAMMAD_DOCS_KB_EN_ID", "DOCS_SYNC_DRY_RUN"):
+            self._env[key] = os.environ.get(key)
+        os.environ.update({
+            "ZAMMAD_BASE_URL": "https://support.example",
+            "ZAMMAD_DOCS_BASE_URL": "https://docs.example",
+            "ZAMMAD_DOCS_SYNC_TOKEN": "x" * 8,
+            "ZAMMAD_DOCS_KB_NL_ID": "1",
+            "ZAMMAD_DOCS_KB_EN_ID": "2",
+        })
+        os.environ.pop("DOCS_SYNC_DRY_RUN", None)
+        # Everything main() could reach that writes or talks to the network.
+        self.synced = []
+        self.dry_runs = []
+        self._sync, self._dry, self._client = ds.sync_language, ds.dry_run, ds.ZammadClient
+        ds.sync_language = lambda *a, **k: self.synced.append(a)
+        ds.dry_run = lambda *a, **k: (self.dry_runs.append(a), 0)[1]
+        ds.ZammadClient = lambda *a, **k: object()
+
+    def tearDown(self):
+        ds.sync_language, ds.dry_run, ds.ZammadClient = self._sync, self._dry, self._client
+        for key, value in self._env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _run(self, argv):
+        stderr, stdout = sys.stderr, sys.stdout
+        sys.stderr, sys.stdout = io.StringIO(), io.StringIO()
+        try:
+            return ds.main(argv), sys.stderr.getvalue(), sys.stdout.getvalue()
+        finally:
+            sys.stderr, sys.stdout = stderr, stdout
+
+    def test_a_typo_aborts_instead_of_syncing(self):
+        code, err, _ = self._run(["--dryrun"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.synced, [], "een typefout mag geen live-sync starten")
+        self.assertEqual(self.dry_runs, [])
+        self.assertIn("--dryrun", err)
+
+    def test_the_message_names_what_is_allowed(self):
+        _, err, _ = self._run(["--dryrun"])
+        self.assertIn("Onbekende optie", err)
+        self.assertIn("--dry-run", err)
+
+    def test_an_unknown_flag_next_to_a_valid_one_also_aborts(self):
+        code, _, _ = self._run(["--dry-run", "--force"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.dry_runs, [], "de droogloop mag niet doorlopen op een halve regel")
+
+    def test_the_real_flag_still_reaches_the_dry_run(self):
+        code, _, _ = self._run(["--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.dry_runs), 1)
+        self.assertEqual(self.synced, [])
+
+    def test_no_flag_still_runs_the_sync(self):
+        """The abort must not swallow the normal nightly invocation."""
+        code, _, _ = self._run([])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.synced), 2, "nl + en")
+
+    def test_help_explains_and_exits_zero(self):
+        code, _, out = self._run(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--dry-run", out)
+        self.assertEqual(self.synced, [])
 
 
 class ParserInvariantTests(unittest.TestCase):
