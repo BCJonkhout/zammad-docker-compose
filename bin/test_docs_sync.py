@@ -12,7 +12,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
 import sys
+import tempfile
 import unittest
 
 # Overridable so the break-the-test probe can point the same suite at a mutated
@@ -45,6 +47,38 @@ SIDEBAR_HTML = """
       <li><a href="/knowledge/"><span>Kennis (bronnen &amp; tools)</span></a></li>
     </ul></details></li>
 </ul></div></nav>
+"""
+
+# A sidebar that offers the gated slugs in every path shape the discovery can
+# produce: with and without a trailing slash, as a .md route, and behind /en/.
+GATED_SIDEBAR_HTML = """
+<ul class="top-level">
+  <li><details open><summary><span class="group-label"><span>Basis</span></span></summary>
+    <ul>
+      <li><a href="/"><span>Home</span></a></li>
+      <li><a href="/getting-started/"><span>Snelstart</span></a></li>
+      <li><a href="/knowledge/"><span>Kennis</span></a></li>
+      <li><a href="/knowledge-model"><span>Het kennismodel</span></a></li>
+      <li><a href="/citations.md"><span>Bronvermelding</span></a></li>
+      <li><a href="/research/index.html"><span>Onderzoek</span></a></li>
+      <li><a href="/changelog/"><span>Wijzigingslog</span></a></li>
+    </ul></details></li>
+</ul>
+"""
+
+GATED_SIDEBAR_HTML_EN = """
+<ul class="top-level">
+  <li><details open><summary><span class="group-label"><span>Basics</span></span></summary>
+    <ul>
+      <li><a href="/en/"><span>Home</span></a></li>
+      <li><a href="/en/getting-started/"><span>Quickstart</span></a></li>
+      <li><a href="/en/knowledge/"><span>Knowledge</span></a></li>
+      <li><a href="/en/knowledge-model"><span>The knowledge model</span></a></li>
+      <li><a href="/en/citations.md"><span>Citations</span></a></li>
+      <li><a href="/en/research/index.html"><span>Research</span></a></li>
+      <li><a href="/en/changelog/"><span>Changelog</span></a></li>
+    </ul></details></li>
+</ul>
 """
 
 MARKDOWN_WITH_FRONTMATTER = (
@@ -102,7 +136,8 @@ class FrontmatterTests(unittest.TestCase):
 class SidebarParserTests(unittest.TestCase):
     def test_tree_titles_order_and_categories(self):
         entries = ds.parse_sidebar_nav("https://docs.prudai.com/", SIDEBAR_HTML)
-        categories, pages = ds.build_sidebar("nl", "https://docs.prudai.com", entries)
+        categories, pages, gated = ds.build_sidebar("nl", "https://docs.prudai.com", entries)
+        self.assertEqual(gated, set())
         self.assertEqual([c.title for c in categories.values()], ["Intro", "Basis"])
         self.assertEqual([p.title for p in pages],
                          ["Prudai | Documentatie", "Snelstart",
@@ -513,12 +548,24 @@ class BearerSkipTests(unittest.TestCase):
             os.environ.pop(key, None)
         self._session = ds.requests.Session
         self._post = ds.requests.post
+        # These tests are about the RUNTIME gate (a 401/302/HTML-200 answer on a
+        # page the sync did try to read), not about the gated-pages list.  Pin
+        # that list to a slug this fixture does not contain, so 'knowledge' here
+        # keeps exercising the runtime path even though the real
+        # gated-pages.json lists it (GatedPagesTests covers that separately).
+        self._tmp = tempfile.mkdtemp()
+        list_path = os.path.join(self._tmp, "gated-pages.json")
+        with open(list_path, "w", encoding="utf-8") as handle:
+            handle.write('{"slugs": ["niet-in-deze-fixture"]}')
+        os.environ[ds.GATED_PAGES_FILE_ENV] = list_path
 
     def tearDown(self):
         ds.requests.Session = self._session
         ds.requests.post = self._post
         for key in ("DOCS_KC_BOT_CLIENT_ID", "DOCS_KC_BOT_CLIENT_SECRET", "DOCS_KC_ISSUER"):
             os.environ.pop(key, None)
+        os.environ.pop(ds.GATED_PAGES_FILE_ENV, None)
+        shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_no_credentials_means_no_bearer(self):
         self.assertIsNone(ds.maybe_docs_bearer())
@@ -620,6 +667,144 @@ class BearerSkipTests(unittest.TestCase):
         with self.assertRaises(ds.DocsIndexError) as caught:
             ds.fetch_docs_tree("https://docs.prudai.com", "nl")
         self.assertIn("in plaats van markdown", str(caught.exception))
+
+
+class GatedPagesTests(unittest.TestCase):
+    """The docs SSO gate must be honoured by the sync, from one source of truth.
+
+    The Zammad knowledge base is anonymously readable, so a gated docs page that
+    reaches it undoes the gate entirely (measured 2026-09-09: the knowledge-model
+    article answered HTTP 200 to an anonymous request).
+    """
+
+    REAL_LIST = "/root/marketing/docs/gated-pages.json"
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._session = ds.requests.Session
+        os.environ.pop(ds.GATED_PAGES_FILE_ENV, None)
+
+    def tearDown(self):
+        ds.requests.Session = self._session
+        os.environ.pop(ds.GATED_PAGES_FILE_ENV, None)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_list(self, content: str) -> str:
+        path = os.path.join(self._tmp, "gated-pages.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.environ[ds.GATED_PAGES_FILE_ENV] = path
+        return path
+
+    # --- the list itself -------------------------------------------------
+
+    def test_default_path_points_at_the_docs_repo(self):
+        """One source of truth: the file the docs site itself is built from."""
+        self.assertEqual(ds.DEFAULT_GATED_PAGES_FILE, self.REAL_LIST)
+
+    def test_reads_the_real_list_from_the_docs_repo(self):
+        if not os.path.exists(self.REAL_LIST):
+            self.skipTest("docs-repo niet aanwezig op deze host")
+        slugs = ds.load_gated_slugs()
+        self.assertIn("knowledge-model", slugs)
+        self.assertIn("changelog", slugs)
+
+    def test_missing_list_fails_closed(self):
+        os.environ[ds.GATED_PAGES_FILE_ENV] = os.path.join(self._tmp, "bestaat-niet.json")
+        with self.assertRaises(ds.GatedPagesError) as caught:
+            ds.load_gated_slugs()
+        self.assertIn("ontbreekt", str(caught.exception))
+
+    def test_unreadable_json_fails_closed(self):
+        self._write_list("{ dit is geen json")
+        with self.assertRaises(ds.GatedPagesError):
+            ds.load_gated_slugs()
+
+    def test_empty_list_fails_closed(self):
+        """Empty must mean 'broken file', never 'nothing is secret'."""
+        self._write_list('{"slugs": []}')
+        with self.assertRaises(ds.GatedPagesError) as caught:
+            ds.load_gated_slugs()
+        self.assertIn("lege lijst", str(caught.exception))
+
+    def test_wrong_shape_fails_closed(self):
+        self._write_list('{"pages": ["knowledge"]}')
+        with self.assertRaises(ds.GatedPagesError):
+            ds.load_gated_slugs()
+
+    def test_fetch_docs_tree_aborts_when_the_list_is_unreadable(self):
+        """Fail-closed reaches all the way up: no crawl, no publish."""
+        os.environ[ds.GATED_PAGES_FILE_ENV] = os.path.join(self._tmp, "weg.json")
+        session = _StubSession(lambda url: _Response(200, GATED_SIDEBAR_HTML, {"Content-Type": "text/html"}))
+        ds.requests.Session = lambda: session
+        with self.assertRaises(ds.GatedPagesError):
+            ds.fetch_docs_tree("https://docs.prudai.com", "nl")
+        self.assertEqual(session.requested, [], "er mag niets zijn opgehaald")
+
+    # --- path shapes -----------------------------------------------------
+
+    def test_every_path_shape_reduces_to_the_base_slug(self):
+        for route in ("/knowledge", "/knowledge/", "/knowledge.md", "/knowledge/index.html",
+                      "/en/knowledge", "/en/knowledge/", "/en/knowledge.md",
+                      "/en/knowledge/index.html", "/knowledge/?x=1", "/knowledge#kop"):
+            self.assertEqual(ds.route_base_slug(route), "knowledge", route)
+
+    def test_a_public_page_is_not_reduced_to_a_gated_slug(self):
+        for route in ("/getting-started/", "/en/getting-started/", "/knowledge-base/"):
+            self.assertNotIn(ds.route_base_slug(route), {"knowledge", "research"})
+
+    # --- discovery -------------------------------------------------------
+
+    def _tree(self, language):
+        self._write_list('{"slugs": ["knowledge-model", "knowledge", "citations", "research", "changelog"]}')
+        sidebar = GATED_SIDEBAR_HTML_EN if language == "en" else GATED_SIDEBAR_HTML
+
+        def router(url):
+            if url.endswith("/") or url.endswith("/en"):
+                return _Response(200, sidebar, {"Content-Type": "text/html"})
+            return _Response(200, "# Kop\n\nTekst.\n")
+
+        session = _StubSession(router)
+        ds.requests.Session = lambda: session
+        return session, ds.fetch_docs_tree("https://docs.prudai.com", language)
+
+    def test_gated_slugs_are_skipped_in_dutch(self):
+        session, (_, pages, markdown, skipped) = self._tree("nl")
+        self.assertEqual({page.slug for page in pages}, {"README", "getting-started"})
+        for slug in ("knowledge", "knowledge-model", "citations", "research", "changelog"):
+            self.assertNotIn(slug, markdown, f"{slug} mag niet opgehaald zijn")
+            self.assertIn(slug, skipped)
+
+    def test_gated_slugs_are_skipped_in_english(self):
+        session, (_, pages, markdown, skipped) = self._tree("en")
+        self.assertEqual({page.slug for page in pages}, {"README", "getting-started"})
+        for slug in ("knowledge", "knowledge-model", "citations", "research", "changelog"):
+            self.assertNotIn(slug, markdown)
+            self.assertIn(slug, skipped)
+
+    def test_gated_pages_are_never_fetched(self):
+        """Skipping at write time would still mint a bearer and pull the content."""
+        session, _ = self._tree("nl")
+        for url in session.requested:
+            for slug in ("knowledge", "knowledge-model", "citations", "research", "changelog"):
+                self.assertNotIn(f"/{slug}.md", url, f"{url} had niet opgehaald mogen worden")
+
+    def test_a_public_page_is_still_published(self):
+        """Counterpart: the skip must not swallow the rest of the docs."""
+        _, (_, pages, markdown, _) = self._tree("nl")
+        self.assertIn("getting-started", markdown)
+        self.assertIn("getting-started", {page.slug for page in pages})
+        self.assertTrue(markdown["getting-started"].strip())
+
+    def test_an_existing_gated_article_is_not_deleted(self):
+        """Withdrawing published articles is Beau's call, not the sync's."""
+        _, (_, pages, _, skipped) = self._tree("nl")
+        client = _RecordingClient()
+        ds.delete_stale_answers(
+            client, 1, "nl", {page.slug for page in pages},
+            {7: _answer(7, "knowledge-model")}, skipped,
+        )
+        self.assertEqual(client.deletes(), [])
 
 
 class ParserInvariantTests(unittest.TestCase):

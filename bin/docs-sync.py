@@ -24,6 +24,16 @@ DOCS_LANG_TAG_PREFIX = "docs-lang-"
 DELETE_FLOOR_MIN = 2
 DELETE_FLOOR_RATIO = 0.10
 DELETE_OVERRIDE_ENV = "DOCS_SYNC_ALLOW_DELETE"
+# SSO-gated docs pages: docs.prudai.com puts a handful of competitive-edge
+# pages behind Keycloak.  The Zammad knowledge base is anonymously readable, so
+# publishing such a page there hands out exactly what the gate protects.  The
+# list is NOT duplicated here -- it is read from gated-pages.json in the docs
+# repo, which is the single source of truth the docs site itself uses
+# (middleware.ts mirrors it, scripts/check-gated-sync.mjs enforces the mirror).
+# The file is not served publicly (docs.prudai.com/gated-pages.json is a 404),
+# so it is read from disk; override the path with DOCS_GATED_PAGES_FILE.
+GATED_PAGES_FILE_ENV = "DOCS_GATED_PAGES_FILE"
+DEFAULT_GATED_PAGES_FILE = "/root/marketing/docs/gated-pages.json"
 DOCS_METADATA_RE = re.compile(
     r"<!--\s*managed-by-docs-sync\s+lang:(?P<lang>[a-z]{2})\s+slug:(?P<slug>[^ ]+)\s+source:(?P<source>[^ ]+)\s*-->",
     re.IGNORECASE,
@@ -649,6 +659,94 @@ def strip_duplicate_leading_heading(title: str, markdown_text: str) -> str:
     return "\n".join(stripped_lines)
 
 
+class GatedPagesError(RuntimeError):
+    """The list of SSO-gated docs pages could not be read -- refuse to sync.
+
+    Fail-closed on purpose.  The bug this guards against is "published too
+    much": if the list is unreadable we cannot tell a gated page from a public
+    one, and continuing would republish the gated pages into an anonymously
+    readable knowledge base.  A red systemd unit is the cheap failure; a leak
+    is not.
+    """
+
+
+def gated_pages_file() -> str:
+    return os.getenv(GATED_PAGES_FILE_ENV, "").strip() or DEFAULT_GATED_PAGES_FILE
+
+
+def load_gated_slugs() -> frozenset[str]:
+    """Read the gated-slug list from the docs repo (single source of truth).
+
+    Raises GatedPagesError on anything that is not a usable, non-empty list --
+    missing file, unreadable JSON, wrong shape, empty ``slugs``.  An empty list
+    is treated as an error rather than as "nothing is gated": the docs site
+    genuinely gates pages today, so an empty list means the file was truncated
+    or the schema moved, not that the gate was lifted.
+    """
+    path = gated_pages_file()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError as exc:
+        raise GatedPagesError(
+            f"De lijst met SSO-afgeschermde docs-pagina's ontbreekt op {path}. "
+            f"Zonder die lijst kan de sync niet zien welke pagina's geheim zijn en zou hij ze "
+            f"publiceren in de anoniem leesbare kennisbank. Zet {GATED_PAGES_FILE_ENV} naar het "
+            "juiste pad (gated-pages.json in de docs-repo) of herstel het bestand."
+        ) from exc
+    except OSError as exc:
+        raise GatedPagesError(
+            f"De lijst met SSO-afgeschermde docs-pagina's op {path} is niet leesbaar "
+            f"({exc.__class__.__name__}: {exc})."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise GatedPagesError(
+            f"De lijst met SSO-afgeschermde docs-pagina's op {path} is geen geldige JSON "
+            f"(regel {exc.lineno}, kolom {exc.colno}: {exc.msg})."
+        ) from exc
+
+    slugs_raw = data.get("slugs") if isinstance(data, dict) else None
+    if not isinstance(slugs_raw, list):
+        raise GatedPagesError(
+            f"{path} heeft geen lijst onder de sleutel 'slugs' (gevonden: "
+            f"{type(slugs_raw).__name__}). Verwacht: {{\"slugs\": [\"knowledge\", ...]}}."
+        )
+    slugs = {str(slug).strip().strip("/") for slug in slugs_raw if str(slug).strip().strip("/")}
+    if not slugs:
+        raise GatedPagesError(
+            f"{path} bevat een lege lijst met afgeschermde slugs. Dat is vrijwel zeker een "
+            "afgekapt of verkeerd geschreven bestand -- de docs-site schermt wel degelijk "
+            "pagina's af. De sync stopt liever dan geheime pagina's te publiceren."
+        )
+    return frozenset(slugs)
+
+
+def route_base_slug(route_path: str) -> str:
+    """Reduce a docs route to its locale-agnostic base slug.
+
+    Mirrors ``baseSlug()`` in the docs middleware, so the sync skips exactly
+    what the gate blocks, in every path shape the sidebar can produce:
+    ``/knowledge``, ``/knowledge/``, ``/knowledge.md``, ``/knowledge/index.html``
+    and the ``/en/`` variants all reduce to ``knowledge``.
+    """
+    path = str(route_path or "").strip().split("#", 1)[0].split("?", 1)[0]
+    path = re.sub(r"/index\.html$", "", path)
+    path = path.rstrip("/")
+    if path.startswith("/en/"):
+        path = path[len("/en/") :]
+    elif path in ("/en", "en"):
+        path = ""
+    else:
+        path = path.lstrip("/")
+    if path.startswith("en/"):
+        path = path[len("en/") :]
+    return path.removesuffix(".md")
+
+
+def is_gated_route(route_path: str, gated_slugs: frozenset[str] | set[str]) -> bool:
+    return route_base_slug(route_path) in gated_slugs
+
+
 class DocsIndexError(RuntimeError):
     """The docs site no longer exposes a readable page index at the expected URL."""
 
@@ -761,12 +859,22 @@ def build_sidebar(
     language: str,
     base_url: str,
     nav_entries: list[tuple[str, tuple[str, ...], str, str]],
-) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef]]:
+    gated_slugs: frozenset[str] | set[str] = frozenset(),
+) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef], set[str]]:
+    """Turn the scraped sidebar into categories + pages.
+
+    SSO-gated pages are dropped here, at discovery time, rather than later at
+    write time: that way they are never fetched either, so the sync stops
+    presenting a service-account bearer for content it has no business
+    republishing.  Their base slugs are returned separately so the caller can
+    keep any already-published article out of the deletion set.
+    """
     categories: dict[tuple[str, ...], CategoryDef] = {}
     pages: list[PageDef] = []
     category_order: dict[tuple[str, ...], int] = defaultdict(int)
     page_order: dict[tuple[str, ...], int] = defaultdict(int)
     seen_slugs: set[str] = set()
+    gated_seen: set[str] = set()
 
     for kind, path, href, title in nav_entries:
         if kind == "group":
@@ -784,6 +892,18 @@ def build_sidebar(
 
         route_path = normalize_whitespace(href)
         if not route_path.startswith("/"):
+            continue
+        if is_gated_route(route_path, gated_slugs):
+            base_slug = route_base_slug(route_path)
+            if base_slug not in gated_seen:
+                gated_seen.add(base_slug)
+                print(
+                    f"[docs-sync] {language}: sla '{base_slug}' over (route {route_path}) — "
+                    "staat in gated-pages.json en zit achter de Keycloak-SSO-poort van "
+                    "docs.prudai.com; de Zammad-kennisbank is anoniem leesbaar, dus dit "
+                    "artikel wordt niet opgehaald en niet gepubliceerd.",
+                    file=sys.stderr,
+                )
             continue
         slug = to_slug(language, route_path)
         if slug in seen_slugs:
@@ -805,7 +925,7 @@ def build_sidebar(
     if not pages:
         raise DocsIndexError(f"No documentation pages discovered for language {language}.")
 
-    return categories, pages
+    return categories, pages, gated_seen
 
 
 def build_answer_body(base_url: str, page: PageDef, markdown_text: str) -> str:
@@ -1239,6 +1359,9 @@ def update_or_create_answer(
 def fetch_docs_tree(
     base_url: str, language: str
 ) -> tuple[dict[tuple[str, ...], CategoryDef], list[PageDef], dict[str, str], set[str]]:
+    # Fail-closed: without a readable gated-slug list we cannot tell a secret
+    # page from a public one, so the run stops before it fetches anything.
+    gated_slugs = load_gated_slugs()
     session = requests.Session()
     session.headers.update(
         {
@@ -1267,11 +1390,14 @@ def fetch_docs_tree(
         )
 
     nav_entries = parse_sidebar_nav(index_url, index_response.text)
-    categories, pages = build_sidebar(language, base_url, nav_entries)
+    categories, pages, gated_seen = build_sidebar(language, base_url, nav_entries, gated_slugs)
 
     markdown_by_slug: dict[str, str] = {}
     kept_pages: list[PageDef] = []
-    skipped_slugs: set[str] = set()
+    # Gated pages count as "skipped", not as "removed from the docs": an
+    # article that is already in the knowledge base must not be pruned by this
+    # change -- withdrawing it is Beau's call, not the sync's.
+    skipped_slugs: set[str] = set(gated_seen)
     for page in pages:
         page_md_url = f"{base_url.rstrip('/')}{page.markdown_path}"
         # No redirect-following: the markdown route is a fixed URL, so a 3xx
@@ -1658,7 +1784,49 @@ def sync_language(client: ZammadClient, kb_id: int, language: str, docs_base_url
     reorder_answers(client, kb_id, pages, path_to_category_id, answers_by_slug)
 
 
+def dry_run(docs_base_url: str) -> int:
+    """Report what a sync would publish and what it would skip -- no writes.
+
+    Touches only the docs site (read-only) and never Zammad, so it is safe to
+    run against production at any moment.  It is the proof that the SSO-gated
+    pages are dropped at discovery time.
+    """
+    gated_slugs = load_gated_slugs()
+    print(
+        f"[docs-sync] DROOGLOOP — geen enkele schrijfactie. Afgeschermde slugs uit "
+        f"{gated_pages_file()}: {', '.join(sorted(gated_slugs))}",
+        file=sys.stderr,
+    )
+    report: dict[str, Any] = {"status": "dry-run", "gated_pages_file": gated_pages_file(),
+                              "gated_slugs": sorted(gated_slugs), "languages": {}}
+    for language in ("nl", "en"):
+        _, pages, markdown_by_slug, skipped_slugs = fetch_docs_tree(docs_base_url, language)
+        published = sorted(page.slug for page in pages)
+        report["languages"][language] = {
+            "zou_publiceren": published,
+            "zou_publiceren_aantal": len(published),
+            "overgeslagen": sorted(skipped_slugs),
+            "afgeschermd_overgeslagen": sorted(set(skipped_slugs) & set(gated_slugs)),
+            "afgeschermd_toch_opgehaald": sorted(set(markdown_by_slug) & set(gated_slugs)),
+        }
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    leaked = [
+        f"{language}:{slug}"
+        for language, data in report["languages"].items()
+        for slug in data["afgeschermd_toch_opgehaald"]
+    ]
+    if leaked:
+        print(
+            f"[docs-sync] FOUT: droogloop haalde afgeschermde pagina's tóch op: {', '.join(leaked)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def main() -> int:
+    if "--dry-run" in sys.argv[1:] or os.getenv("DOCS_SYNC_DRY_RUN", "").strip() == "1":
+        return dry_run(getenv("ZAMMAD_DOCS_BASE_URL"))
     base_url = getenv("ZAMMAD_BASE_URL")
     docs_base_url = getenv("ZAMMAD_DOCS_BASE_URL")
     token = getenv("ZAMMAD_DOCS_SYNC_TOKEN")
@@ -1685,6 +1853,11 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except GatedPagesError as exc:
+        # Fail-closed on an unreadable gated-page list: exit 1 (red unit) rather
+        # than publish pages that sit behind the SSO gate.
+        print(f"[docs-sync] FOUT (fail-closed): {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
     except DocsIndexError as exc:
         # Structural change on the docs site: report it in plain language and
         # fail (exit 1) so the systemd unit goes red -- but without the bare
