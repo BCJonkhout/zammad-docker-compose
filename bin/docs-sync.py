@@ -1635,9 +1635,36 @@ def delete_stale_categories(
     kb_id: int,
     desired_category_paths: set[tuple[str, ...]],
     kb_locale_id: int,
+    protected_slugs: frozenset[str] | set[str] = frozenset(),
 ) -> None:
+    """Prune managed categories whose path is gone from the docs navigation.
+
+    ``protected_slugs`` is the same keep-set delete_stale_answers gets: seeded
+    from gated-pages.json, plus whatever could not be read this run.  Such an
+    article is deliberately never fetched, never moved and never pruned, so it
+    stays behind in whatever category it was published in -- and if the docs
+    navigation has since dropped that category, this function would target a
+    category that is not empty.
+
+    Zammad does not cascade: KnowledgeBase::Category declares
+    ``has_many :answers, dependent: :restrict_with_exception``, and the REST
+    destroy is a plain ``destroy!``.  So the DELETE is refused, the non-200
+    raises, and the whole nightly run dies -- after the article upserts, before
+    the English knowledge base is touched at all.  Protecting the article from
+    deletion while still aiming at its category therefore trades silent data
+    loss for a guaranteed red unit; neither is the intent.
+
+    Driven by what the knowledge base actually holds, not by what the navigation
+    shows: the navigation is exactly the thing that may have stopped mentioning
+    these pages.  A category holding both a protected and a public page is
+    already in ``desired_category_paths`` via the public page; the protection
+    here only adds the case where nothing public is left.
+    """
     assets = get_kb_snapshot(client, kb_id)
     categories_by_id, _ = build_category_state(assets, kb_locale_id, kb_id)
+    answers_by_id, _ = build_answer_state(
+        assets, kb_locale_id, allowed_category_ids=set(categories_by_id)
+    )
     path_by_id: dict[int, tuple[str, ...]] = {}
 
     def build_path(category_id: int) -> tuple[str, ...]:
@@ -1651,8 +1678,33 @@ def delete_stale_categories(
         path_by_id[category_id] = path
         return path
 
+    # A category holding a protected article -- and every ancestor of it, since
+    # deleting a parent takes the subtree -- is off limits, and does not count
+    # towards the deletion allowance either: it is not a candidate at all.
+    protected_ids: set[int] = set()
+    for answer in answers_by_id.values():
+        if not answer.slug or answer.slug not in protected_slugs:
+            continue
+        node: int | None = answer.category_id
+        while node is not None and node in categories_by_id and node not in protected_ids:
+            protected_ids.add(node)
+            node = categories_by_id[node].parent_id
+
     ordered = sorted(categories_by_id.values(), key=lambda item: (-len(build_path(item.id)), item.id))
-    doomed = [category for category in ordered if build_path(category.id) not in desired_category_paths]
+    doomed = [
+        category
+        for category in ordered
+        if build_path(category.id) not in desired_category_paths and category.id not in protected_ids
+    ]
+    for category in ordered:
+        if category.id in protected_ids and build_path(category.id) not in desired_category_paths:
+            print(
+                f"[docs-sync] KB {kb_id}: categorie '{'/'.join(build_path(category.id))}' staat niet "
+                "meer in de navigatie maar bevat nog een afgeschermd/onleesbaar artikel — "
+                "niet verwijderd. Intrekken van zulke artikelen loopt via "
+                "bin/docs-sync-gated-report.py, niet via de sync.",
+                file=sys.stderr,
+            )
     if not doomed:
         return
 
@@ -1798,7 +1850,7 @@ def sync_language(client: ZammadClient, kb_id: int, language: str, docs_base_url
     allowed_category_ids = set(categories_by_id)
     answers_by_id, answers_by_slug = build_answer_state(assets, kb_locale_id, allowed_category_ids=allowed_category_ids)
     delete_stale_answers(client, kb_id, language, desired_slugs, answers_by_id, skipped_slugs)
-    delete_stale_categories(client, kb_id, set(category_defs.keys()), kb_locale_id)
+    delete_stale_categories(client, kb_id, set(category_defs.keys()), kb_locale_id, skipped_slugs)
     reorder_categories(client, kb_id, kb_locale_id, category_defs)
 
     assets = get_kb_snapshot(client, kb_id)

@@ -1129,5 +1129,113 @@ class ParserInvariantTests(unittest.TestCase):
         self.assertNotRegex(out, r"<li>[^<]*\|")
 
 
+
+class ProtectedCategoryTests(unittest.TestCase):
+    """A category that still holds a protected article is not a deletion candidate.
+
+    A gated slug is never fetched, so its article is never re-filed into a new
+    category: it stays where it was published.  The moment docs.prudai.com drops
+    that grouping from its navigation -- which is what happened to
+    "Research (alleen LEO)" -- the category becomes orphaned while still holding
+    the very article the SSO fix exists to protect.
+
+    Zammad refuses to destroy a category that still has answers
+    (``dependent: :restrict_with_exception``), so aiming at it does not quietly
+    delete the article: it returns non-200, docs-sync raises, and the whole
+    nightly run dies before the English knowledge base is synced at all.  Either
+    way the category must not be targeted.
+    """
+
+    @staticmethod
+    def _category(category_id, title, parent_id=None):
+        return ds.CategoryState(
+            id=category_id, title=title, parent_id=parent_id, translation_id=category_id
+        )
+
+    def _install(self, categories, answers):
+        self._snapshot = ds.get_kb_snapshot
+        self._cats = ds.build_category_state
+        self._answers = ds.build_answer_state
+        ds.get_kb_snapshot = lambda client, kb_id: {}
+        ds.build_category_state = lambda assets, locale, kb_id: (categories, {})
+        ds.build_answer_state = lambda assets, locale, allowed_category_ids=None: (answers, {})
+
+    def tearDown(self):
+        if hasattr(self, "_snapshot"):
+            ds.get_kb_snapshot = self._snapshot
+            ds.build_category_state = self._cats
+            ds.build_answer_state = self._answers
+
+    def _run(self, protected):
+        # 3 categories: one desired, one orphan+empty, one orphan holding the
+        # protected article.  Allowance for 3 categories is the floor, 2.
+        categories = {
+            1: self._category(1, "Basis"),
+            2: self._category(2, "Dashboards"),
+            3: self._category(3, "Research (alleen LEO)"),
+        }
+        research = ds.AnswerState(
+            id=21, title="Research", category_id=3, translation_id=21, content_id=21,
+            body="", tags=[], published=True, slug="research", language="nl",
+            source_url=None, managed=True,
+        )
+        self._install(categories, {21: research})
+        client = _RecordingClient()
+        ds.delete_stale_categories(client, 1, {("Basis",)}, 7, protected)
+        return client.deletes()
+
+    def test_the_category_of_a_protected_article_survives(self):
+        self.assertEqual(
+            self._run(frozenset({"research"})),
+            ["/api/v1/knowledge_bases/1/categories/2"],
+            "alleen de lege weescategorie mag weg, niet die met het afgeschermde artikel",
+        )
+
+    def test_without_the_protection_that_same_category_is_targeted(self):
+        """Counterpart, so the test above cannot pass by never deleting anything."""
+        self.assertIn(
+            "/api/v1/knowledge_bases/1/categories/3",
+            self._run(frozenset()),
+            "zonder bescherming mikt de opruiming wél op de categorie van het gated artikel",
+        )
+
+    def test_an_ancestor_of_a_protected_article_is_protected_too(self):
+        """Deleting a parent takes the subtree, so parents count as protected."""
+        categories = {
+            1: self._category(1, "Basis"),
+            2: self._category(2, "Archief"),
+            3: self._category(3, "Research (alleen LEO)", parent_id=2),
+        }
+        research = ds.AnswerState(
+            id=21, title="Research", category_id=3, translation_id=21, content_id=21,
+            body="", tags=[], published=True, slug="research", language="nl",
+            source_url=None, managed=True,
+        )
+        self._install(categories, {21: research})
+        client = _RecordingClient()
+        ds.delete_stale_categories(client, 1, {("Basis",)}, 7, frozenset({"research"}))
+        self.assertEqual(client.deletes(), [], "noch de ouder noch het kind mag weg")
+
+    def test_a_protected_category_does_not_eat_the_deletion_allowance(self):
+        """It is not a candidate, so it must not push a legitimate cleanup over the guard."""
+        categories = {index: self._category(index, f"Wees {index}") for index in range(1, 4)}
+        categories[4] = self._category(4, "Research (alleen LEO)")
+        categories[5] = self._category(5, "Basis")
+        research = ds.AnswerState(
+            id=21, title="Research", category_id=4, translation_id=21, content_id=21,
+            body="", tags=[], published=True, slug="research", language="nl",
+            source_url=None, managed=True,
+        )
+        self._install(categories, {21: research})
+        client = _RecordingClient()
+        # 3 real orphans against an allowance of max(2, int(5 * 0.10)) = 2 -> the
+        # guard fires on the genuine backlog, and the protected one is not in it.
+        with self.assertRaises(ds.DocsIndexError) as caught:
+            ds.delete_stale_categories(client, 1, {("Basis",)}, 7, frozenset({"research"}))
+        self.assertIn("3 van 5", str(caught.exception))
+        self.assertNotIn("Research (alleen LEO)", str(caught.exception))
+        self.assertEqual(client.deletes(), [], "de guard breekt af vóór elke DELETE")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
