@@ -623,7 +623,10 @@ class BearerSkipTests(unittest.TestCase):
 
     def test_a_401_page_is_skipped_and_the_run_continues(self):
         categories, pages, markdown, skipped = self._gated_tree()
-        self.assertEqual(skipped, {"knowledge"})
+        # The skip set is seeded from the gated-page list (pinned here to a slug
+        # this fixture does not contain), so assert the runtime-skipped page was
+        # *added* to it rather than that it is the only member.
+        self.assertIn("knowledge", skipped)
         self.assertNotIn("knowledge", {page.slug for page in pages})
         self.assertNotIn("knowledge", markdown)
         # the other three pages still came through
@@ -663,7 +666,7 @@ class BearerSkipTests(unittest.TestCase):
 
         ds.requests.Session = lambda: _StubSession(router)
         _, pages, _, skipped = ds.fetch_docs_tree("https://docs.prudai.com", "nl")
-        self.assertEqual(skipped, {"knowledge"})
+        self.assertIn("knowledge", skipped)
         self.assertNotIn("knowledge", {page.slug for page in pages})
 
     def test_an_html_login_page_served_as_200_is_refused(self):
@@ -876,6 +879,83 @@ class GatedReportLocaleTests(unittest.TestCase):
             object(), "https://support.prudai.com", 1, "nl", frozenset({"iets-anders"}),
         )
         self.assertEqual(rows, [])
+
+
+class SkipSetComesFromTheListTests(unittest.TestCase):
+    """Protection of published articles must not depend on the public navigation.
+
+    ``skipped_slugs`` is what keeps an already-published gated article out of
+    delete_stale_answers.  Seeding it from what the sidebar showed this run tied
+    that protection to the docs site's menu: the day docs.prudai.com stops
+    linking its gated pages publicly -- the obvious next step for pages that are
+    secret anyway -- the slug would vanish from the skip set and the live KB
+    article would be pruned as "removed from the docs".
+    """
+
+    # A navigation with no gated entry at all: only public pages.
+    PUBLIC_ONLY_SIDEBAR = """
+    <ul class="top-level">
+      <li><details open><summary><span class="group-label"><span>Basis</span></span></summary>
+        <ul>
+          <li><a href="/"><span>Home</span></a></li>
+          <li><a href="/getting-started/"><span>Snelstart</span></a></li>
+        </ul></details></li>
+    </ul>
+    """
+
+    def setUp(self):
+        self._session = ds.requests.Session
+        self._tmp = tempfile.mkdtemp()
+        path = os.path.join(self._tmp, "gated-pages.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"slugs": ["knowledge-model", "knowledge", "citations", "research", "changelog"]}')
+        os.environ[ds.GATED_PAGES_FILE_ENV] = path
+
+    def tearDown(self):
+        ds.requests.Session = self._session
+        os.environ.pop(ds.GATED_PAGES_FILE_ENV, None)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _tree_without_gated_nav(self):
+        def router(url):
+            if url.endswith("/") or url.endswith("/en"):
+                return _Response(200, self.PUBLIC_ONLY_SIDEBAR, {"Content-Type": "text/html"})
+            return _Response(200, "# Kop\n\nTekst.\n")
+
+        ds.requests.Session = lambda: _StubSession(router)
+        return ds.fetch_docs_tree("https://docs.prudai.com", "nl")
+
+    def test_skipped_slugs_hold_the_whole_list_even_with_an_empty_navigation(self):
+        _, pages, _, skipped = self._tree_without_gated_nav()
+        self.assertEqual({page.slug for page in pages}, {"README", "getting-started"})
+        for slug in ("knowledge", "knowledge-model", "citations", "research", "changelog"):
+            self.assertIn(slug, skipped, f"{slug} staat op de lijst en hoort in de skip-set")
+
+    def test_existing_gated_articles_survive_a_navigation_without_them(self):
+        """The point of the whole thing: nothing is deleted."""
+        _, pages, _, skipped = self._tree_without_gated_nav()
+        client = _RecordingClient()
+        existing = {
+            index: _answer(index, slug)
+            for index, slug in enumerate(
+                ("knowledge", "knowledge-model", "citations", "research", "changelog"), start=1
+            )
+        }
+        existing[99] = _answer(99, "getting-started")
+        ds.delete_stale_answers(
+            client, 1, "nl", {page.slug for page in pages} | skipped, existing, skipped,
+        )
+        self.assertEqual(client.deletes(), [], "geen enkel bestaand artikel mag verdwijnen")
+
+    def test_a_genuinely_removed_public_page_is_still_pruned(self):
+        """Counterpart: the widened skip set must not disable pruning entirely."""
+        _, pages, _, skipped = self._tree_without_gated_nav()
+        client = _RecordingClient()
+        ds.delete_stale_answers(
+            client, 1, "nl", {page.slug for page in pages} | skipped,
+            {4: _answer(4, "echt-verwijderd")}, skipped,
+        )
+        self.assertEqual(client.deletes(), ["/api/v1/knowledge_bases/1/answers/4"])
 
 
 class ParserInvariantTests(unittest.TestCase):

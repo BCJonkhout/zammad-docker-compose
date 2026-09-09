@@ -1390,14 +1390,25 @@ def fetch_docs_tree(
         )
 
     nav_entries = parse_sidebar_nav(index_url, index_response.text)
-    categories, pages, gated_seen = build_sidebar(language, base_url, nav_entries, gated_slugs)
+    # `_gated_seen` is only which gated slugs this run's navigation happened to
+    # offer -- useful for the log line build_sidebar() already printed, but
+    # deliberately NOT what the skip set is built from (see below).
+    categories, pages, _gated_seen = build_sidebar(language, base_url, nav_entries, gated_slugs)
 
     markdown_by_slug: dict[str, str] = {}
     kept_pages: list[PageDef] = []
     # Gated pages count as "skipped", not as "removed from the docs": an
     # article that is already in the knowledge base must not be pruned by this
     # change -- withdrawing it is Beau's call, not the sync's.
-    skipped_slugs: set[str] = set(gated_seen)
+    #
+    # Seeded from the gated-page LIST, not from `gated_seen` (what the rendered
+    # navigation happened to offer this run).  Those differ the moment the docs
+    # site stops linking a gated page from the public sidebar -- a plausible
+    # next step for pages that are secret anyway -- and then the protection
+    # would evaporate exactly when it matters: the slug drops out of both
+    # `desired_slugs` and `skipped_slugs`, and delete_stale_answers prunes the
+    # published article. The list is the invariant; the navigation is weather.
+    skipped_slugs: set[str] = set(gated_slugs)
     for page in pages:
         page_md_url = f"{base_url.rstrip('/')}{page.markdown_path}"
         # No redirect-following: the markdown route is a fixed URL, so a 3xx
