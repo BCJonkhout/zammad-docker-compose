@@ -22,8 +22,9 @@ ZAMMAD_DOCS_SYNC_TOKEN="$(<"${ZAMMAD_DOCS_SYNC_TOKEN_FILE}")"
 # previous secret-file mechanism (ZAMMAD_DOCS_KC_SECRET_FILE) is gone: it never
 # had a file to read, and a second source of truth only invites drift.
 if [[ -z "${DOCS_KC_BOT_CLIENT_ID:-}" || -z "${DOCS_KC_BOT_CLIENT_SECRET:-}" ]]; then
-  echo "[run-docs-sync] Geen DOCS_KC_BOT_CLIENT_ID/SECRET in .env — de 4 SSO-afgeschermde" >&2
-  echo "[run-docs-sync] pagina's worden overgeslagen. Herstel: bao kv patch kv/prod/zammad/app" >&2
+  echo "[run-docs-sync] Geen DOCS_KC_BOT_CLIENT_ID/SECRET in .env — de pagina's uit" >&2
+  echo "[run-docs-sync] gated-pages.json (docs-repo) worden overgeslagen; docs-sync.py noemt" >&2
+  echo "[run-docs-sync] ze per stuk in zijn eigen log. Herstel: bao kv patch kv/prod/zammad/app" >&2
   echo "[run-docs-sync] DOCS_KC_BOT_CLIENT_ID=... DOCS_KC_BOT_CLIENT_SECRET=... && bao-fetch zammad" >&2
 fi
 

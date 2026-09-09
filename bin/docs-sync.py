@@ -142,9 +142,11 @@ def maybe_docs_bearer() -> str | None:
     role is checked.  So the client here must be one of those client ids --
     ``prudai-docs-bot`` is the existing one.
 
-    A failure to mint the token is never fatal: the 4 gated pages are then
-    skipped with a warning, exactly as when no credentials are configured at
-    all.  Letting it raise would take all 48 readable pages down with it.
+    A failure to mint the token is never fatal: the pages listed in
+    gated-pages.json are then skipped with a warning, exactly as when no
+    credentials are configured at all.  Letting it raise would take every
+    readable page down with it.  Counts are deliberately not written out here --
+    the list is the source of truth and any copy of it goes stale.
     """
     client_id = os.getenv("DOCS_KC_BOT_CLIENT_ID", "").strip()
     client_secret = os.getenv("DOCS_KC_BOT_CLIENT_SECRET", "").strip()
@@ -1439,7 +1441,8 @@ def fetch_docs_tree(
             # SSO-gated "competitive edge" page (see gated-pages.json on the docs
             # site). Skip it instead of failing the whole run, and keep any
             # existing KB article -- an unreadable page must never cost us the
-            # other 48, nor get itself pruned as "removed from the docs".
+            # rest of the documentation, nor get itself pruned as "removed from
+            # the docs".
             if bearer:
                 # Credentials ARE configured and the gate still says no: the
                 # token is valid but its azp is not in the docs middleware's

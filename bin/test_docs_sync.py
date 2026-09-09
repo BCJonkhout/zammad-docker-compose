@@ -1040,6 +1040,71 @@ class ArgumentValidationTests(unittest.TestCase):
         self.assertEqual(self.synced, [])
 
 
+class GatedListIsNotCopiedTests(unittest.TestCase):
+    """No second copy of the gated-page list anywhere in this repo.
+
+    The list was enumerated in four places ("the 4 SSO-gated pages (knowledge,
+    knowledge-model, citations, research)") and every one of them was already
+    wrong the day 'changelog' was added -- including one that provisioning
+    rewrites, so the stale text came back after every provisioning run.  Prose
+    must point at gated-pages.json, not restate it.
+    """
+
+    BIN = os.path.dirname(os.path.abspath(MODULE_PATH))
+    ROOT = os.path.dirname(BIN)
+    # Every file that talks about the gated pages but is not the list itself.
+    FILES = ("docs-sync.env", "bin/run-docs-sync.sh", "bin/provision-zammad.sh", "bin/docs-sync.py")
+    SLUGS = ("knowledge-model", "knowledge", "citations", "research", "changelog")
+    WINDOW = 240
+
+    def _slug_hits(self, text):
+        """Positions of each gated slug; 'knowledge' does not match inside 'knowledge-model'."""
+        hits = []
+        for slug in self.SLUGS:
+            for match in re.finditer(rf"(?<![\w-]){re.escape(slug)}(?![\w-])", text):
+                hits.append((match.start(), slug))
+        return sorted(hits)
+
+    def test_no_file_restates_the_gated_list(self):
+        for relative in self.FILES:
+            path = os.path.join(self.ROOT, relative)
+            if not os.path.exists(path):
+                self.skipTest(f"{relative} niet aanwezig")
+            hits = self._slug_hits(open(path, encoding="utf-8").read())
+            for index, (start, _) in enumerate(hits):
+                nearby = {slug for position, slug in hits[index:] if position - start <= self.WINDOW}
+                self.assertLess(
+                    len(nearby), 3,
+                    f"{relative} somt de afgeschermde slugs weer op ({sorted(nearby)}) rond "
+                    f"positie {start} -- verwijs naar gated-pages.json in plaats van te kopieren",
+                )
+
+    def test_the_detector_would_catch_the_text_it_replaced(self):
+        """Non-vacuity: the exact comment that was there until this change."""
+        stale = ("# Keycloak service-account for the 4 SSO-gated docs pages (knowledge,\n"
+                 "# knowledge-model, citations, research).  Do NOT set the credentials here:")
+        hits = self._slug_hits(stale)
+        nearby = {slug for position, slug in hits if position - hits[0][0] <= self.WINDOW}
+        self.assertGreaterEqual(len(nearby), 3)
+
+    def test_provisioning_and_the_checked_in_env_stay_in_step(self):
+        """provision-zammad.sh rewrites docs-sync.env wholesale.
+
+        If the two drift, the next provisioning run silently reintroduces the
+        text this change removed.
+        """
+        provision = os.path.join(self.BIN, "provision-zammad.sh")
+        env_file = os.path.join(self.ROOT, "docs-sync.env")
+        if not (os.path.exists(provision) and os.path.exists(env_file)):
+            self.skipTest("provisioning of docs-sync.env niet aanwezig")
+        written = re.findall(r'^\s*"(#[^"]*)",\s*$', open(provision, encoding="utf-8").read(), re.M)
+        self.assertTrue(written, "geen commentaarregels gevonden in provision-zammad.sh")
+        env_text = open(env_file, encoding="utf-8").read()
+        for line in written:
+            self.assertIn(line, env_text,
+                          "docs-sync.env loopt achter op wat provision-zammad.sh erin schrijft")
+
+
 class ParserInvariantTests(unittest.TestCase):
     def test_every_block_branch_consumes_a_line(self):
         """A branch that consumes nothing would hang the nightly sync forever."""
