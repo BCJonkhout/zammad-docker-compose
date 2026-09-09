@@ -25,6 +25,18 @@ ds = importlib.util.module_from_spec(spec)
 sys.modules["docs_sync"] = ds
 spec.loader.exec_module(ds)
 
+# The gated report lives next to docs-sync.py and imports it by relative path,
+# so a probe that mutates a copy of bin/ moves both together.
+REPORT_PATH = os.path.join(os.path.dirname(os.path.abspath(MODULE_PATH)), "docs-sync-gated-report.py")
+
+
+def load_report_module():
+    """Import bin/docs-sync-gated-report.py fresh (it re-execs docs-sync.py)."""
+    report_spec = importlib.util.spec_from_file_location("docs_sync_gated_report", REPORT_PATH)
+    report = importlib.util.module_from_spec(report_spec)
+    report_spec.loader.exec_module(report)
+    return report
+
 DOCS = "https://docs.prudai.com"
 
 
@@ -805,6 +817,65 @@ class GatedPagesTests(unittest.TestCase):
             {7: _answer(7, "knowledge-model")}, skipped,
         )
         self.assertEqual(client.deletes(), [])
+
+
+class GatedReportLocaleTests(unittest.TestCase):
+    """The report measures a URL; the URL must be the one Zammad actually serves.
+
+    Zammad's /knowledge_bases/init payload keys the KB locales as
+    "KnowledgeBaseLocale".  The report asked asset_table() for
+    "KnowledgeBase::Locale"/"knowledge_base_locale" only, got {} back, and fell
+    through to a hardcoded language segment -- so it would report a URL that
+    does not exist (404) and conclude the article is not exposed, which is the
+    single thing this report is for.
+    """
+
+    ASSETS = {
+        "KnowledgeBaseLocale": {
+            "3": {"id": 3, "knowledge_base_id": 1, "primary": True, "system_locale_id": 9},
+        },
+        "Locale": {"9": {"id": 9, "locale": "nl-informal"}},
+        "KnowledgeBaseCategory": {"5": {"id": 5, "knowledge_base_id": 1, "parent_id": None}},
+        "KnowledgeBaseCategoryTranslation": {
+            "11": {"id": 11, "category_id": 5, "kb_locale_id": 3, "title": "Basis"},
+        },
+        "KnowledgeBaseAnswer": {
+            "7": {"id": 7, "category_id": 5, "published_at": "2026-09-01T00:00:00Z",
+                  "tags": ["managed-by-docs-sync", "docs-lang-nl"]},
+        },
+        "KnowledgeBaseAnswerTranslation": {
+            "13": {"id": 13, "answer_id": 7, "kb_locale_id": 3, "title": "Kennis", "content_id": 21},
+        },
+        "KnowledgeBaseAnswerTranslationContent": {"21": {"id": 21, "body": "<p>x</p>"}},
+    }
+
+    def setUp(self):
+        self.ASSETS["KnowledgeBaseAnswer"]["7"]["tags"] = [
+            "managed-by-docs-sync", "docs-lang-nl", f"{ds.DOCS_MARKER_PREFIX}knowledge",
+        ]
+        self.report = load_report_module()
+        self.report.ds.get_kb_snapshot = lambda client, kb_id: self.ASSETS
+        self.report.anonymous_status = lambda url: 200
+
+    def test_the_locale_key_list_matches_docs_sync(self):
+        """One canonical name list, not two that drift."""
+        source = open(REPORT_PATH, encoding="utf-8").read()
+        self.assertIn('ds.asset_table(assets, "KnowledgeBaseLocale", "KnowledgeBase::Locale")', source)
+
+    def test_the_reported_url_uses_the_locale_zammad_actually_has(self):
+        rows = self.report.collect(
+            object(), "https://support.prudai.com", 1, "nl", frozenset({"knowledge"}),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["publieke_url"], "https://support.prudai.com/help/nl-informal/5/7",
+        )
+
+    def test_a_public_article_is_not_reported(self):
+        rows = self.report.collect(
+            object(), "https://support.prudai.com", 1, "nl", frozenset({"iets-anders"}),
+        )
+        self.assertEqual(rows, [])
 
 
 class ParserInvariantTests(unittest.TestCase):

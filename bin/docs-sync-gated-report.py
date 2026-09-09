@@ -69,7 +69,11 @@ def collect(client: ds.ZammadClient, base_url: str, kb_id: int, language: str,
             gated_slugs: frozenset[str]) -> list[dict[str, Any]]:
     assets = ds.get_kb_snapshot(client, kb_id)
     kb_locale_id = ds.get_kb_locale_id(assets, kb_id)
-    locales = ds.asset_table(assets, "KnowledgeBase::Locale", "knowledge_base_locale")
+    # Same key list as docs-sync.py's get_kb_locale_id(): Zammad's /init payload
+    # keys this table as "KnowledgeBaseLocale".  Missing that first name made
+    # asset_table() fall through to {} and the locale silently defaulted, which
+    # put the wrong language segment in the public URL this report measures.
+    locales = ds.asset_table(assets, "KnowledgeBaseLocale", "KnowledgeBase::Locale")
     locale_code = "nl-nl" if language == "nl" else "en-us"
     for locale in locales.values():
         if int(locale.get("id") or 0) == kb_locale_id:
