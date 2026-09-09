@@ -568,8 +568,10 @@ env_path.write_text(
             # Keep in step with docs-sync.env: this script rewrites that file
             # wholesale, so anything documented only there is lost on the next
             # provisioning run.
-            "# Keycloak service-account for the 4 SSO-gated docs pages (knowledge,",
-            "# knowledge-model, citations, research).  Do NOT set the credentials here:",
+            "# Keycloak service-account for the SSO-gated docs pages.  Which pages those",
+            "# are is NOT enumerated here: gated-pages.json in the docs repo is the single",
+            "# source of truth and docs-sync.py reads it directly (a copy in this comment",
+            "# went stale the moment 'changelog' was added).  Do NOT set the credentials here:",
             "# DOCS_KC_BOT_CLIENT_ID + DOCS_KC_BOT_CLIENT_SECRET come from OpenBao",
             "# (kv/prod/zammad/app) and are rendered into /root/zammad/.env by `bao-fetch",
             "# zammad`, which run-docs-sync.sh sources before this file.  OpenBao is the",
