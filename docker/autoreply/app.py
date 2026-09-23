@@ -583,10 +583,10 @@ class LiteLLMClient:
             )
 
         system_prompt = (
-            "You are PrudAI Support's automatic first-response assistant and ticket triage worker.\n"
-            "Use only the supplied PrudAI documentation passages for any customer-facing factual claim.\n"
+            "You are Prudai Support's automatic first-response assistant and ticket triage worker.\n"
+            "Use only the supplied Prudai documentation passages for any customer-facing factual claim.\n"
             "Decide whether to answer immediately, hand the ticket to a human, or escalate it.\n"
-            "Choose disposition=reply_with_docs only when the retrieved PrudAI docs clearly answer the customer's request.\n"
+            "Choose disposition=reply_with_docs only when the retrieved Prudai docs clearly answer the customer's request.\n"
             "Choose disposition=handoff when the docs are not enough but the ticket is not urgent.\n"
             "Choose disposition=escalate when the request sounds urgent, risky, outage-related, security-related, billing-related, data-related, or access-related.\n"
             "Return strict JSON with keys: disposition, category, priority, customer_reply_html, internal_note_html, used_sources.\n"
@@ -603,7 +603,7 @@ class LiteLLMClient:
             [
                 f"Ticket title: {ticket_title}",
                 f"Customer message: {customer_message}",
-                "Retrieved PrudAI docs:",
+                "Retrieved Prudai docs:",
                 "\n\n".join(docs_blocks) if docs_blocks else "[none]",
             ]
         )
@@ -653,7 +653,7 @@ class AutoreplyService:
         ]
         self.support_escalation_from = str(os.getenv("SUPPORT_ESCALATION_EMAIL_FROM") or "support@prudai.com").strip()
         self.support_escalation_from_name = (
-            str(os.getenv("SUPPORT_ESCALATION_EMAIL_FROM_NAME") or "PrudAI Support").strip()
+            str(os.getenv("SUPPORT_ESCALATION_EMAIL_FROM_NAME") or "Prudai Support").strip()
         )
 
     def is_authorized(self, header_value: str | None) -> bool:
@@ -921,13 +921,13 @@ class AutoreplyService:
     def _default_internal_note_html(self, *, disposition: str, category: str, language: str) -> str:
         if language == "nl":
             if disposition == DISPOSITION_REPLY:
-                return "<p>Er is automatisch een eerste antwoord opgesteld op basis van PrudAI-documentatie.</p>"
+                return "<p>Er is automatisch een eerste antwoord opgesteld op basis van Prudai-documentatie.</p>"
             if disposition == DISPOSITION_ESCALATE:
                 return "<p>Het ticket is gemarkeerd voor snelle menselijke opvolging vanwege het onderwerp of risico.</p>"
             return "<p>Er is geen veilig documentatieantwoord gevonden; een menselijk supportantwoord is nodig.</p>"
 
         if disposition == DISPOSITION_REPLY:
-            return "<p>An automatic first response was generated from PrudAI documentation.</p>"
+            return "<p>An automatic first response was generated from Prudai documentation.</p>"
         if disposition == DISPOSITION_ESCALATE:
             return "<p>The ticket was marked for fast human follow-up because of its risk or urgency.</p>"
         return "<p>No safe documentation-based answer was found, so the ticket was handed to a human agent.</p>"
@@ -935,12 +935,12 @@ class AutoreplyService:
     def _default_escalation_reply_html(self, *, language: str) -> str:
         if language == "nl":
             return (
-                "<p>Dank voor uw bericht. Ik zet dit direct door naar een medewerker van PrudAI Support, "
+                "<p>Dank voor uw bericht. Ik zet dit direct door naar een medewerker van Prudai Support, "
                 "zodat u hier persoonlijke hulp bij krijgt.</p>"
             )
 
         return (
-            "<p>Thanks for your message. I am escalating this ticket to a PrudAI Support employee now so "
+            "<p>Thanks for your message. I am escalating this ticket to a Prudai Support employee now so "
             "you can get personal follow-up.</p>"
         )
 
@@ -964,10 +964,10 @@ class AutoreplyService:
         article_excerpt = clip(html_to_text(str(source_article.get("body") or "")), 600)
         ticket_link = f"{self.public_base_url}/#ticket/zoom/{ticket_id}"
 
-        subject = f"PrudAI AI escalation ({ticket_title})"
+        subject = f"Prudai AI escalation ({ticket_title})"
         text_body = "\n".join(
             [
-                "PrudAI AI escalated a support ticket for human follow-up.",
+                "Prudai AI escalated a support ticket for human follow-up.",
                 "",
                 f"Ticket: #{ticket_number}",
                 f"Title: {ticket_title}",
@@ -981,7 +981,7 @@ class AutoreplyService:
         )
         html_body = "\n".join(
             [
-                "<div>PrudAI AI escalated a support ticket for human follow-up.</div>",
+                "<div>Prudai AI escalated a support ticket for human follow-up.</div>",
                 f"<div><strong>Ticket:</strong> #{escape(ticket_number)}</div>",
                 f"<div><strong>Title:</strong> {escape(ticket_title)}</div>",
                 f"<div><strong>Customer:</strong> {escape(customer_label)}</div>",
@@ -1155,7 +1155,7 @@ class AutoreplyService:
     ) -> str:
         parts = [decision["customer_reply_html"]]
         if decision["disposition"] == DISPOSITION_REPLY and decision["used_sources"]:
-            parts.append("<hr><p><strong>Relevant PrudAI docs:</strong></p><ul>")
+            parts.append("<hr><p><strong>Relevant Prudai docs:</strong></p><ul>")
             for index in decision["used_sources"]:
                 result = results[index - 1]
                 url = escape(result.public_url or self._fallback_public_url(), quote=True)
@@ -1174,7 +1174,7 @@ class AutoreplyService:
         priority_label = escape(decision["priority"])
 
         parts = [
-            "<p><strong>PrudAI AI support agent</strong></p>",
+            "<p><strong>Prudai AI support agent</strong></p>",
             "<ul>",
             f"<li>Disposition: {disposition_label}</li>",
             f"<li>Category: {category_label}</li>",
@@ -1190,7 +1190,7 @@ class AutoreplyService:
             parts.append("</ul>")
 
         if decision["used_sources"]:
-            parts.append("<p><strong>Retrieved PrudAI docs used:</strong></p><ul>")
+            parts.append("<p><strong>Retrieved Prudai docs used:</strong></p><ul>")
             for index in decision["used_sources"]:
                 result = results[index - 1]
                 url = escape(result.public_url or self._fallback_public_url(), quote=True)
@@ -1248,7 +1248,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", DEFAULT_PORT), RequestHandler)
-    LOGGER.info("Starting PrudAI Zammad autoreply service on port %s", DEFAULT_PORT)
+    LOGGER.info("Starting Prudai Zammad autoreply service on port %s", DEFAULT_PORT)
     server.serve_forever()
 
 

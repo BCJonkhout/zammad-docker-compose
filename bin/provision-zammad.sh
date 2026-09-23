@@ -166,7 +166,7 @@ def ensure_kb(title:, locale:, color_highlight:, color_header:, color_header_lin
   locale_record = kb.kb_locales.find_by(system_locale_id: locale.id) || kb.kb_locales.first
   translation = kb.translations.find_or_initialize_by(kb_locale_id: locale_record.id)
   translation.title = title
-  translation.footer_note = 'PrudAI Support'
+  translation.footer_note = 'Prudai Support'
   translation.save!
 
   kb
@@ -297,8 +297,8 @@ service_notification_matrix = {
 
 Setting.set('fqdn', fqdn)
 Setting.set('http_type', 'https')
-Setting.set('organization', 'PrudAI')
-Setting.set('product_name', 'PrudAI Support')
+Setting.set('organization', 'Prudai')
+Setting.set('product_name', 'Prudai Support')
 Setting.set('locale_default', nl_locale.locale)
 Setting.set('ticket_agent_default_notifications', staff_notification_matrix)
 
@@ -313,7 +313,7 @@ Setting.set('auth_openid_connect', true)
 Setting.set(
   'auth_openid_connect_credentials',
   {
-    'display_name' => 'Login met PrudAI',
+    'display_name' => 'Login met Prudai',
     'identifier'   => client_id,
     'issuer'       => "https://login.prudai.com/realms/#{realm}",
     'uid_field'    => 'sub',
@@ -338,14 +338,14 @@ Setting.set('ai_assistance_ticket_summary', true)
 Setting.set('ai_assistance_text_tools', true)
 
 kb_nl = ensure_kb(
-  title:             'PrudAI Docs - NL',
+  title:             'Prudai Docs - NL',
   locale:            nl_locale,
   color_highlight:   '#345CF3',
   color_header:      '#FFFFFF',
   color_header_link: '#0F172A'
 )
 kb_en = ensure_kb(
-  title:             'PrudAI Docs - EN',
+  title:             'Prudai Docs - EN',
   locale:            en_locale,
   color_highlight:   '#345CF3',
   color_header:      '#FFFFFF',
@@ -422,7 +422,7 @@ staff_emails.each do |email|
   staff_configured << email
 end
 
-Setting.set('notification_sender', '"PrudAI Support" <support@prudai.com>')
+Setting.set('notification_sender', '"Prudai Support" <support@prudai.com>')
 
 smtp_configured = false
 unless sendgrid_api_key.empty?
@@ -453,9 +453,9 @@ end
 
 escalation_trigger_perform = {
   'notification.email' => {
-    'subject'   => 'PrudAI AI escalation (#{ticket.title})',
+    'subject'   => 'Prudai AI escalation (#{ticket.title})',
     'recipient' => ['support@prudai.com'],
-    'body'      => '<div>PrudAI AI escalated ticket <b>(#{config.ticket_hook}#{ticket.number})</b> for human follow-up.</div><br/><div><b>Title:</b> #{ticket.title}</div><div><b>Customer:</b> #{ticket.customer&.email}</div><div><b>Group:</b> #{ticket.group&.name}</div><div><b>Link:</b> <a href="#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}">#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}</a></div><br/><div>#{config.product_name}</div>'
+    'body'      => '<div>Prudai AI escalated ticket <b>(#{config.ticket_hook}#{ticket.number})</b> for human follow-up.</div><br/><div><b>Title:</b> #{ticket.title}</div><div><b>Customer:</b> #{ticket.customer&.email}</div><div><b>Group:</b> #{ticket.group&.name}</div><div><b>Link:</b> <a href="#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}">#{config.http_type}://#{config.fqdn}/#ticket/zoom/#{ticket.id}</a></div><br/><div>#{config.product_name}</div>'
   }
 }
 
@@ -467,7 +467,7 @@ ticket_trigger = ensure_ticket_trigger(
   article_sender_id: 1,
   article_type_ids: nil,
   extra_condition: {
-    'article.body'      => { 'operator' => 'matches regex', 'value' => '(?im)PrudAI AI support agent.*Disposition:\\s*escalate' }
+    'article.body'      => { 'operator' => 'matches regex', 'value' => '(?im)Prudai AI support agent.*Disposition:\\s*escalate' }
   }
 )
 
@@ -479,7 +479,7 @@ ticket_trigger_followup = ensure_ticket_trigger(
   article_sender_id: 1,
   article_type_ids: nil,
   extra_condition: {
-    'article.body'      => { 'operator' => 'matches regex', 'value' => '(?im)PrudAI AI support agent.*Disposition:\\s*escalate' }
+    'article.body'      => { 'operator' => 'matches regex', 'value' => '(?im)Prudai AI support agent.*Disposition:\\s*escalate' }
   }
 )
 
@@ -491,7 +491,7 @@ autoreply_webhook.ssl_verify = false
 autoreply_webhook.customized_payload = false
 autoreply_webhook.custom_payload = nil
 autoreply_webhook.bearer_token = autoreply_webhook_bearer_token
-autoreply_webhook.note = 'PrudAI BM25-grounded automation for new tickets and customer follow-ups.'
+autoreply_webhook.note = 'Prudai BM25-grounded automation for new tickets and customer follow-ups.'
 autoreply_webhook.save!
 
 autoreply_trigger = ensure_ticket_trigger(

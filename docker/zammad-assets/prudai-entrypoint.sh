@@ -9,7 +9,7 @@ inject_prudai_styles() {
   local matched=0
 
   if [[ ! -f "${css_file}" ]]; then
-    echo "Missing PrudAI stylesheet at ${css_file}." >&2
+    echo "Missing Prudai stylesheet at ${css_file}." >&2
     return 1
   fi
 
@@ -35,7 +35,7 @@ RUBY
     return 1
   fi
 
-  echo "Injected PrudAI styles into compiled Zammad CSS bundles."
+  echo "Injected Prudai styles into compiled Zammad CSS bundles."
 }
 
 if [[ "${1:-}" == "zammad-nginx" ]]; then

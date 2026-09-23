@@ -4,14 +4,14 @@ This guide applies inside the `zammad/` repository.
 
 ## Purpose
 
-- This repository runs PrudAI's customer support stack at `https://support.prudai.com`.
-- It is used for customer tickets, the public knowledge base, PrudAI SSO login, and AI-assisted first-response support.
+- This repository runs Prudai's customer support stack at `https://support.prudai.com`.
+- It is used for customer tickets, the public knowledge base, Prudai SSO login, and AI-assisted first-response support.
 - The goal is to let customers self-serve or receive fast AI help first, while escalating to human staff when the AI detects risk, security, billing, account-access, outage, or insufficient documentation coverage.
-- The public service health page for PrudAI is `https://status.prudai.com`.
+- The public service health page for Prudai is `https://status.prudai.com`.
 
 ## Playwright SSO Testing
 
-- Use `codex@prudai.com` as the default Playwright login for PrudAI SSO browser testing.
+- Use `codex@prudai.com` as the default Playwright login for Prudai SSO browser testing.
 - Read credentials from the local-only file `/root/.codex/secrets/playwright-codex.env`.
 - Do not store the password in repo files, tests, fixtures, or commits.
 - Save refreshed Playwright storage state files under `/root/.codex/secrets/` when you need an authenticated browser session.
@@ -28,7 +28,7 @@ This guide applies inside the `zammad/` repository.
 ### Login and portal
 
 - Customers log in at `https://support.prudai.com/#login`.
-- PrudAI SSO is the primary login path.
+- Prudai SSO is the primary login path.
 - Dutch (`nl-nl`) and light mode are the intended defaults.
 - Custom login, portal, knowledge-base, and ticket UI behavior lives in:
   - `docker/zammad-assets/application.html.erb`
@@ -37,8 +37,8 @@ This guide applies inside the `zammad/` repository.
 
 ### Knowledge base
 
-- Zammad hosts PrudAI's public docs in Dutch and English knowledge bases.
-- The docs sync flow pulls content from PrudAI docs into Zammad.
+- Zammad hosts Prudai's public docs in Dutch and English knowledge bases.
+- The docs sync flow pulls content from Prudai docs into Zammad.
 - Main files:
   - `bin/docs-sync.py`
   - `bin/run-docs-sync.sh`
@@ -101,7 +101,7 @@ time here:
 
 - A customer creates a ticket from the portal or sends a follow-up on an existing ticket.
 - Zammad triggers a webhook to `zammad-autoreply`.
-- `zammad-autoreply` retrieves the ticket articles, searches the PrudAI knowledge base, asks the model for a decision, and then:
+- `zammad-autoreply` retrieves the ticket articles, searches the Prudai knowledge base, asks the model for a decision, and then:
   - posts a public reply if the docs clearly answer the question
   - posts a public escalation notice plus an internal note if a human should take over
   - posts an internal handoff note if the AI cannot safely answer from docs
@@ -118,11 +118,11 @@ time here:
 
 ## Provisioning
 
-- `bin/provision-zammad.sh` is the main PrudAI-specific setup entrypoint.
+- `bin/provision-zammad.sh` is the main Prudai-specific setup entrypoint.
 - It configures:
-  - PrudAI branding and logos
+  - Prudai branding and logos
   - Dutch locale defaults
-  - PrudAI OIDC / SSO
+  - Prudai OIDC / SSO
   - knowledge bases
   - service users and API tokens
   - SMTP sender configuration
@@ -140,13 +140,13 @@ time here:
 - `docker-compose.yml`
   - Base service definitions.
 - `docker-compose.override.yml`
-  - PrudAI-specific runtime overrides and asset versioning.
+  - Prudai-specific runtime overrides and asset versioning.
 - `docker/zammad-assets/application.html.erb`
   - Global app shell customization, localization helpers, and ticket/login UI tweaks.
 - `docker/zammad-assets/knowledge_base.html.erb`
   - Knowledge base shell customization.
 - `docker/zammad-assets/prudai-support.css`
-  - PrudAI-specific styling.
+  - Prudai-specific styling.
 
 ## Common Operations
 
@@ -154,7 +154,7 @@ time here:
   - `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --build --force-recreate`
 - Rebuild only the AI autoreply service:
   - `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --build --force-recreate zammad-autoreply`
-- Apply PrudAI provisioning again:
+- Apply Prudai provisioning again:
   - `bash bin/provision-zammad.sh`
 - Check autoreply logs:
   - `docker logs -f zammad-zammad-autoreply-1`
