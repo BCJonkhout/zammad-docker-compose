@@ -102,7 +102,7 @@
 
         document.documentElement.lang = 'nl';
         if (/ - Sign in$/.test(document.title)) {
-          document.title = 'PrudAI Support - Inloggen';
+          document.title = 'Prudai Support - Inloggen';
         }
 
         var heading = loginRoot.querySelector('.fullscreen-body > p:first-child');
@@ -112,7 +112,7 @@
 
         if (authProviders) {
           Array.prototype.forEach.call(authProviders.querySelectorAll('.provider-name'), function(node) {
-            node.textContent = 'Login met PrudAI';
+            node.textContent = 'Login met Prudai';
           });
         }
 
