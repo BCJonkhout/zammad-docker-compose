@@ -10,3 +10,6 @@ __pycache__/
 .bao-role-id
 .bao-sources
 
+# Local pytest venv for docker/autoreply (see docker/autoreply/tests/README.md)
+.venv/
+.pytest_cache/
