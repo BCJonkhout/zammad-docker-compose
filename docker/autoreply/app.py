@@ -349,17 +349,161 @@ def build_search_queries(*values: str) -> list[str]:
     return candidates
 
 
+# ZAM-4: allowlist sanitizer for model-shaped HTML. The LLM output is
+# prompt-injectable (ZAM-3) and is posted to Zammad as text/html, so we do
+# not depend on Zammad's server-side sanitizer alone. Everything not listed
+# here is dropped: unknown tags are unwrapped (text kept), the elements in
+# SANITIZE_DROP_WITH_CONTENT disappear together with their content, every
+# attribute outside SANITIZE_ALLOWED_ATTRIBUTES (so all on*, style, srcdoc,
+# ...) is removed and href only survives with an http/https/mailto/relative
+# target (no javascript:, data:, vbscript:, ...).
+SANITIZE_ALLOWED_TAGS = frozenset(
+    {
+        "a", "b", "blockquote", "br", "code", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+        "hr", "i", "li", "ol", "p", "pre", "s", "small", "span", "strong", "sub", "sup",
+        "table", "tbody", "td", "th", "thead", "tr", "u", "ul",
+    }
+)
+SANITIZE_VOID_TAGS = frozenset({"br", "hr"})
+SANITIZE_DROP_WITH_CONTENT = frozenset(
+    {
+        "applet", "audio", "base", "button", "canvas", "embed", "form", "frame", "frameset",
+        "head", "iframe", "input", "link", "math", "meta", "noscript", "object", "script",
+        "select", "style", "svg", "template", "textarea", "title", "video",
+    }
+)
+# Tags that never carry an end tag in HTML; a "drop" entry for them must not
+# open a skip region or everything after them would vanish.
+SANITIZE_HTML_VOID_ELEMENTS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+)
+SANITIZE_ALLOWED_ATTRIBUTES: dict[str, frozenset[str]] = {
+    "*": frozenset({"title"}),
+    "a": frozenset({"href"}),
+    "td": frozenset({"colspan", "rowspan"}),
+    "th": frozenset({"colspan", "rowspan"}),
+}
+SANITIZE_ALLOWED_URL_SCHEMES = frozenset({"http", "https", "mailto"})
+_URL_SCHEME_RE = re.compile(r"^([a-z][a-z0-9+.\-]*):", re.IGNORECASE)
+_URL_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]+")
+
+
+def is_safe_href(value: str | None) -> bool:
+    """True for relative links and http/https/mailto; False for every other scheme."""
+    if value is None:
+        return False
+    cleaned = _URL_CONTROL_RE.sub("", unescape(value))
+    if not cleaned:
+        return False
+    match = _URL_SCHEME_RE.match(cleaned)
+    if match is None:
+        # No scheme: relative URL. Reject protocol-relative "//host" too.
+        return not cleaned.startswith("//")
+    return match.group(1).lower() in SANITIZE_ALLOWED_URL_SCHEMES
+
+
+class _AllowlistSanitizer(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.open_tags: list[str] = []
+        self.skip_depth = 0
+        self.emitted_element = False
+
+    # -- helpers -----------------------------------------------------------
+    def _allowed_attributes(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        allowed = SANITIZE_ALLOWED_ATTRIBUTES["*"] | SANITIZE_ALLOWED_ATTRIBUTES.get(tag, frozenset())
+        rendered: list[str] = []
+        for raw_name, raw_value in attrs:
+            name = (raw_name or "").strip().lower()
+            if name not in allowed:
+                continue
+            value = raw_value if raw_value is not None else ""
+            if name == "href":
+                if not is_safe_href(value):
+                    continue
+                value = _URL_CONTROL_RE.sub("", unescape(value))
+            rendered.append(f' {name}="{escape(value, quote=True)}"')
+        if tag == "a" and any(item.startswith(" href=") for item in rendered):
+            rendered.append(' target="_blank" rel="noopener noreferrer"')
+        return "".join(rendered)
+
+    # -- parser callbacks --------------------------------------------------
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self.skip_depth:
+            if tag in SANITIZE_DROP_WITH_CONTENT and tag not in SANITIZE_HTML_VOID_ELEMENTS:
+                self.skip_depth += 1
+            return
+        if tag in SANITIZE_DROP_WITH_CONTENT:
+            if tag not in SANITIZE_HTML_VOID_ELEMENTS:
+                self.skip_depth = 1
+            return
+        if tag not in SANITIZE_ALLOWED_TAGS:
+            return  # unknown tag: unwrap (keep its text), drop the tag itself
+        self.emitted_element = True
+        self.parts.append(f"<{tag}{self._allowed_attributes(tag, attrs)}>")
+        if tag not in SANITIZE_VOID_TAGS:
+            self.open_tags.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in SANITIZE_VOID_TAGS or tag in SANITIZE_HTML_VOID_ELEMENTS:
+            self.handle_starttag(tag, attrs)
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self.skip_depth:
+            if tag in SANITIZE_DROP_WITH_CONTENT and tag not in SANITIZE_HTML_VOID_ELEMENTS:
+                self.skip_depth -= 1
+            return
+        if tag in SANITIZE_VOID_TAGS or tag not in self.open_tags:
+            return
+        while self.open_tags:
+            open_tag = self.open_tags.pop()
+            self.parts.append(f"</{open_tag}>")
+            if open_tag == tag:
+                break
+
+    def handle_data(self, data: str) -> None:
+        if self.skip_depth:
+            return
+        self.parts.append(escape(data, quote=False))
+
+    def handle_comment(self, data: str) -> None:  # noqa: ARG002 - dropped on purpose
+        return
+
+    def handle_decl(self, decl: str) -> None:  # noqa: ARG002 - <!DOCTYPE ...> dropped
+        return
+
+    def handle_pi(self, data: str) -> None:  # noqa: ARG002 - <?php ... ?> dropped
+        return
+
+    def unknown_decl(self, data: str) -> None:  # noqa: ARG002 - <![CDATA[ ... dropped
+        return
+
+    def result(self) -> str:
+        self.close()
+        while self.open_tags:
+            self.parts.append(f"</{self.open_tags.pop()}>")
+        return "".join(self.parts).strip()
+
+
 def sanitize_html_fragment(value: str) -> str:
     fragment = (value or "").strip()
     if not fragment:
         return ""
-    fragment = re.sub(r"<\s*(script|style)\b.*?>.*?<\s*/\s*\1\s*>", "", fragment, flags=re.IGNORECASE | re.DOTALL)
-    fragment = re.sub(r"<!DOCTYPE.*?>", "", fragment, flags=re.IGNORECASE | re.DOTALL)
-    fragment = re.sub(r"<\s*/?\s*(html|head|body)\b[^>]*>", "", fragment, flags=re.IGNORECASE)
-    fragment = fragment.strip()
-    if "<" not in fragment and ">" not in fragment:
-        fragment = f"<p>{escape(fragment)}</p>"
-    return fragment
+    sanitizer = _AllowlistSanitizer()
+    sanitizer.feed(fragment)
+    cleaned = sanitizer.result()
+    if not cleaned:
+        return ""
+    if not sanitizer.emitted_element:
+        cleaned = f"<p>{cleaned}</p>"
+    return cleaned
 
 
 def sanitize_tag(value: str) -> str | None:
