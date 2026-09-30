@@ -128,6 +128,7 @@ raw_output="$(
     -e ZAMMAD_BOOTSTRAP_ADMIN_EMAIL="${ZAMMAD_BOOTSTRAP_ADMIN_EMAIL}" \
     -e ZAMMAD_FQDN="${ZAMMAD_FQDN}" \
     -e ZAMMAD_SHARED_ORGANIZATION_IDS="${ZAMMAD_SHARED_ORGANIZATION_IDS:-}" \
+    -e AUTOREPLY_TOKEN_ROTATE="${AUTOREPLY_TOKEN_ROTATE:-}" \
     zammad-railsserver \
     bash -lc 'cat > /tmp/prudai-provision.rb && bundle exec rails runner /tmp/prudai-provision.rb' <<'RUBY'
 require 'json'
@@ -173,8 +174,12 @@ def ensure_kb(title:, locale:, color_highlight:, color_header:, color_header_lin
   kb
 end
 
-def ensure_persistent_api_token(user:, name:, permissions: nil)
+def ensure_persistent_api_token(user:, name:, permissions: nil, rotate: false)
   token = Token.where(action: 'api', user_id: user.id, persistent: true).find_by(name: name)
+  if rotate && token
+    token.destroy!
+    token = nil
+  end
   attributes = {
     action:     'api',
     persistent: true,
@@ -416,7 +421,11 @@ autoreply_user.active = true
 autoreply_user.created_by_id ||= 1
 autoreply_user.updated_by_id = 1
 autoreply_user.password = SecureRandom.urlsafe_base64(32) if autoreply_user.new_record?
-autoreply_user.roles = [admin_role, agent_role]
+# ZAM-1: the autoreply container ingests customer e-mail, so its service
+# account is agent-only. Zammad checks a token against BOTH the token's own
+# permission list and the user's role permissions (Token::Permissions), so the
+# role and the list below together are the ceiling of what a leaked token can do.
+autoreply_user.roles = [agent_role]
 autoreply_user.group_names_access_map = { users_group.name => 'full' }
 apply_user_preferences(
   autoreply_user,
@@ -425,11 +434,20 @@ apply_user_preferences(
   notification_matrix: service_notification_matrix
 )
 autoreply_user.save!
+raise 'autoreply service user must not hold admin permissions (ZAM-1).' if autoreply_user.permissions?('admin')
+
+# Exactly what docker/autoreply/app.py calls, nothing more:
+#   ticket.agent           GET  ticket_articles/by_ticket, GET/POST tags, PUT tickets (priority),
+#                          POST ticket_articles (public reply + internal note)
+#   knowledge_base.reader  POST knowledge_bases/search (flavor agent), GET knowledge_bases/:id/answers/:id
+AUTOREPLY_TOKEN_PERMISSIONS = %w[ticket.agent knowledge_base.reader].freeze
+autoreply_token_rotate = ENV.fetch('AUTOREPLY_TOKEN_ROTATE', '') == '1'
 
 autoreply_token = ensure_persistent_api_token(
   user:        autoreply_user,
   name:        'autoreply-agent',
-  permissions: autoreply_user.permissions.pluck(:name).uniq
+  permissions: AUTOREPLY_TOKEN_PERMISSIONS,
+  rotate:      autoreply_token_rotate
 )
 
 staff_emails = [bootstrap_admin_email, 'haisma@prudai.com'].map(&:downcase).uniq
@@ -559,7 +577,10 @@ puts "__RESULT__#{JSON.generate(
   autoreply_trigger_followup_id: autoreply_trigger_followup.id,
   autoreply_webhook_id: autoreply_webhook.id,
   shared_organization_ids: shared_organization_ids,
-  organizations_unshared: organizations_unshared
+  organizations_unshared: organizations_unshared,
+  autoreply_token_permissions: AUTOREPLY_TOKEN_PERMISSIONS,
+  autoreply_token_rotated: autoreply_token_rotate,
+  autoreply_roles: autoreply_user.roles.map(&:name)
 )}"
 RUBY
 )"

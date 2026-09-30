@@ -16,6 +16,68 @@ steps or design limitations rather than code.
 | ZAM-6 | Info | shared realm signup lands as Customer (correct) | no change, see below |
 | ZAM-7 | Info | bearer compare not constant-time | `docker/autoreply/app.py` (`hmac.compare_digest`) |
 
+## ZAM-1 — least-privilege autoreply service account (ops step required)
+
+Before: the `ai-agent@…` service user had roles `Admin + Agent` and its
+persistent API token `autoreply-agent` was minted with *all* of the user's
+permissions (`admin`, `report`, `knowledge_base.editor`, …). That token is
+mounted read-only into `zammad-autoreply`, the one container that parses
+attacker-controlled inbound e-mail and makes outbound HTTP.
+
+After (`bin/provision-zammad.sh`, ZAM-1 block):
+
+- Service user roles: **`Agent` only**, group access `Users: full`. The
+  script raises if the user still resolves `admin`.
+- Token `autoreply-agent` permission list, exactly what `docker/autoreply/app.py`
+  calls and nothing more:
+
+  | Permission | Endpoints in `app.py` (`ZammadClient`) |
+  |---|---|
+  | `ticket.agent` | `GET /api/v1/ticket_articles/by_ticket/:id`, `GET /api/v1/tags?object=Ticket`, `POST /api/v1/tags/add`, `PUT /api/v1/tickets/:id` (priority), `POST /api/v1/ticket_articles` (public reply, internal note) |
+  | `knowledge_base.reader` | `POST /api/v1/knowledge_bases/search` (flavor `agent`; the `public` flavor needs no permission), `GET /api/v1/knowledge_bases/:kb/answers/:id` |
+
+  Zammad evaluates a token as *user permissions AND token permission list*
+  (`Token::Permissions#permissions?`), so both halves are the ceiling.
+  `test_provision_contract.py` fails if `app.py` starts calling other Zammad
+  endpoints, so the list and the code cannot drift apart silently.
+
+### Ops step — apply and re-mint
+
+The next provisioning run narrows the existing token in place (same token
+value, smaller scope). Because the old value lived for months inside the
+e-mail-exposed container, also rotate it once:
+
+```sh
+cd /root/zammad
+agent-bus claim zammad "ZAM-1 autoreply token re-mint"   # coordinate, it recreates zammad-autoreply
+AUTOREPLY_TOKEN_ROTATE=1 bash bin/provision-zammad.sh
+```
+
+What that does: destroys token `autoreply-agent`, creates a fresh one with the
+two permissions above, writes it to `secrets/autoreply.token` (mode 600), and
+recreates `zammad-autoreply` (the script already does that at the end).
+Verify afterwards, read-only:
+
+```sh
+docker exec zammad-zammad-postgresql-1 psql -U zammad -d zammad_production -Atc \
+  "select preferences from tokens where name='autoreply-agent' and action='api';"
+# expect only: ticket.agent, knowledge_base.reader
+docker exec zammad-zammad-postgresql-1 psql -U zammad -d zammad_production -Atc \
+  "select r.name from users u join roles_users ru on ru.user_id=u.id join roles r on r.id=ru.role_id where u.email='ai-agent@support.prudai.com';"
+# expect only: Agent
+```
+
+Then send one test ticket from a customer account and confirm the autoreply
+still posts its public reply + internal note (`docker logs zammad-zammad-autoreply-1`);
+a `403` on any `/api/v1/...` call there means the scope is too narrow — the
+table above is the contract to compare against.
+
+Same class, not changed here: the `docs-sync` service user also carries
+`Admin` (its token *is* scoped to `knowledge_base.editor`, and it runs from a
+host systemd unit rather than an internet-facing container). A dedicated
+"knowledge-base editor" role would remove that residual; queued as follow-up,
+not part of this change.
+
 ## ZAM-2 — Zammad has no tenant primitive (design limitation)
 
 Zammad is a single-tenant helpdesk: one `zammad_production` database, no
