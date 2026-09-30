@@ -122,6 +122,54 @@ Standing rules that follow from this:
 - A cross-tenant requirement stronger than "trust the role check" ⇒ dedicated
   instance.
 
+## ZAM-5 — Elasticsearch authentication (gated rollout)
+
+`zammad-elasticsearch` indexes every ticket, article, user and KB answer and
+ran with `xpack.security.enabled=false`. It publishes no host port (only the
+opt-in `scenarios/add-hostport-to-elasticsearch.yml` does, and the contract
+test keeps it that way), but any container on the compose network
+(`zammad-autoreply`, `litellm`, …) could read all customer tickets from it
+without credentials.
+
+`docker-compose.yml` now reads the flag from the environment:
+
+| Variable (names only — values live in OpenBao `kv/prod/zammad/app`, rendered into `.env` by `bao-fetch zammad`) | Role |
+|---|---|
+| `ELASTICSEARCH_SECURITY_ENABLED` | `true` turns on `xpack.security.enabled`; unset/`false` = today's behaviour |
+| `ELASTICSEARCH_USER` | must be `elastic` (the built-in superuser ES bootstraps) |
+| `ELASTICSEARCH_PASS` | used twice: as `ELASTIC_PASSWORD` (ES bootstrap password for `elastic`) and by Zammad, whose image entrypoint writes `es_user`/`es_password` settings from `ELASTICSEARCH_USER`/`ELASTICSEARCH_PASS` when both are set |
+| `ELASTICSEARCH_SCHEMA` | stays `http`: TLS is explicitly off on the HTTP and transport layers, the container is only reachable inside the compose network |
+
+Merging this compose change is itself a config change for the ES container,
+so the next `docker compose up -d` recreates `zammad-elasticsearch` even with
+the gate off. Do the whole thing in one window:
+
+1. Add the three values to `kv/prod/zammad/app` (`ELASTICSEARCH_SECURITY_ENABLED=true`,
+   `ELASTICSEARCH_USER=elastic`, a fresh `ELASTICSEARCH_PASS`), then `bao-fetch zammad`
+   and confirm the names appear in `/root/zammad/.env` (`grep -c '^ELASTICSEARCH_' .env`).
+2. `agent-bus claim zammad "ZAM-5 ES auth"`; announce a short search-index blip.
+3. `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --force-recreate zammad-elasticsearch`
+   and wait until `docker logs zammad-zammad-elasticsearch-1` shows the node
+   started (`"started"` line, no `bootstrap checks failed`).
+4. Push the credentials into Zammad's settings: `docker compose … up -d --force-recreate zammad-init`
+   (its entrypoint sets `es_user`/`es_password`, then waits for ES and runs
+   the search-index check). Follow with `… up -d --force-recreate zammad-railsserver zammad-scheduler zammad-websocket`
+   so the app processes pick up the new env.
+5. Verify, all read-only:
+   - `docker exec zammad-zammad-autoreply-1 python -c "import urllib.request;urllib.request.urlopen('http://zammad-elasticsearch:9200/zammad*/_search')"`
+     must now fail with HTTP 401 (that was the finding).
+   - `docker exec zammad-zammad-railsserver-1 bundle exec rails r 'puts SearchIndexBackend.info.present?'`
+     prints `true`, and a ticket search in the agent UI returns results.
+   - post-deploy runbook §1/§2 (`/root/docs/runbooks/post-deploy.md`).
+6. Rollback = set `ELASTICSEARCH_SECURITY_ENABLED=false` (or remove it),
+   `bao-fetch zammad`, repeat steps 3–4. The index data is unaffected either
+   way; only the auth layer flips.
+
+Not done here: the ES container is not moved to a separate internal network.
+That is the stronger cut (autoreply/litellm would then have no route to ES at
+all) and needs the nginx/railsserver network layout reviewed first; the auth
+gate is the step that can ship inside one window.
+
 ## ZAM-6 — shared `prudai` realm signup (no change)
 
 OIDC is configured without role/group mapping, `Customer` is the only role

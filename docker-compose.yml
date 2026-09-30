@@ -95,7 +95,17 @@ services:
       - elasticsearch-data:/usr/share/elasticsearch/data
     environment:
       discovery.type: single-node
-      xpack.security.enabled: 'false'
+      # ZAM-5: Elasticsearch holds a full copy of every ticket. Authentication
+      # is gated behind ELASTICSEARCH_SECURITY_ENABLED so it can be switched on
+      # in a maintenance window; the default keeps today's behaviour. With the
+      # gate on, ES boots the built-in `elastic` user with ELASTICSEARCH_PASS
+      # (the same variable Zammad already reads, see docker-entrypoint.sh of the
+      # image) and stays on plain HTTP inside the compose network, so
+      # ELASTICSEARCH_SCHEMA remains http. Rollout: docs/security-readiness-q4-2026.md.
+      xpack.security.enabled: ${ELASTICSEARCH_SECURITY_ENABLED:-false}
+      xpack.security.http.ssl.enabled: 'false'
+      xpack.security.transport.ssl.enabled: 'false'
+      ELASTIC_PASSWORD: ${ELASTICSEARCH_PASS:-}
       ES_JAVA_OPTS: ${ELASTICSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}
 
   zammad-init:
