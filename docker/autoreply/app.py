@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -657,8 +658,11 @@ class AutoreplyService:
         )
 
     def is_authorized(self, header_value: str | None) -> bool:
-        expected = f"Bearer {self.webhook_token}"
-        return (header_value or "").strip() == expected
+        # ZAM-7: constant-time compare so the bearer check leaks no timing
+        # signal. Both sides are encoded so a non-ASCII header cannot raise.
+        expected = f"Bearer {self.webhook_token}".encode("utf-8")
+        presented = (header_value or "").strip().encode("utf-8")
+        return hmac.compare_digest(presented, expected)
 
     def process_ticket(self, payload: dict[str, Any]) -> dict[str, Any]:
         ticket = payload.get("ticket") or {}
