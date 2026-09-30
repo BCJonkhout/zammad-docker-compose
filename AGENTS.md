@@ -177,6 +177,17 @@ time here:
   - `Setting.get('locale_default')`
   - user preferences in Zammad
 
+## Security readiness (Q4-2026)
+
+- `docs/security-readiness-q4-2026.md` holds the ops steps and design notes for
+  findings ZAM-1 … ZAM-7 (least-privilege autoreply token, `organizations.shared`
+  default false, optional Elasticsearch auth). Read it before re-running
+  `bin/provision-zammad.sh` or touching the autoreply service account.
+- Zammad has **no tenant primitive**: never put two customer companies in one
+  organization, and never give a customer `Agent`. Details in that document.
+- Tests for `docker/autoreply/app.py` and the provisioning contract:
+  `.venv/bin/pytest docker/autoreply -q` (see `docker/autoreply/tests/README.md`).
+
 ## Git
 
 - If you create a commit from this repo, use the format:

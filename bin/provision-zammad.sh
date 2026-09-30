@@ -127,6 +127,7 @@ raw_output="$(
     -e SENDGRID_API_KEY="${sendgrid_api_key}" \
     -e ZAMMAD_BOOTSTRAP_ADMIN_EMAIL="${ZAMMAD_BOOTSTRAP_ADMIN_EMAIL}" \
     -e ZAMMAD_FQDN="${ZAMMAD_FQDN}" \
+    -e ZAMMAD_SHARED_ORGANIZATION_IDS="${ZAMMAD_SHARED_ORGANIZATION_IDS:-}" \
     zammad-railsserver \
     bash -lc 'cat > /tmp/prudai-provision.rb && bundle exec rails runner /tmp/prudai-provision.rb' <<'RUBY'
 require 'json'
@@ -337,6 +338,35 @@ Setting.set(
 Setting.set('ai_assistance_ticket_summary', true)
 Setting.set('ai_assistance_text_tools', true)
 
+# ZAM-2: Zammad has no tenant primitive. An Organization with shared=true lets
+# every member read every other member's tickets, and Zammad seeds that flag
+# as default TRUE (db/seeds/object_manager_attributes.rb, "Shared organization").
+# Prudai puts several customer companies on one instance, so the provisioning
+# default is the other way round: new organizations are created unshared, and
+# every existing organization is unshared unless its id is listed explicitly
+# in ZAMMAD_SHARED_ORGANIZATION_IDS (comma-separated). See
+# docs/security-readiness-q4-2026.md.
+shared_organization_ids = ENV.fetch('ZAMMAD_SHARED_ORGANIZATION_IDS', '')
+                             .split(',')
+                             .map(&:strip)
+                             .reject(&:empty?)
+                             .map(&:to_i)
+
+shared_attribute = ObjectManager::Attribute.get(object: 'Organization', name: 'shared')
+raise 'Organization.shared attribute missing from the object manager.' if shared_attribute.nil?
+
+shared_data_option = (shared_attribute.data_option || {}).deep_stringify_keys
+if shared_data_option['default'] != false
+  shared_attribute.data_option = shared_data_option.merge('default' => false)
+  shared_attribute.save!
+end
+
+organizations_unshared = []
+Organization.where(shared: true).where.not(id: shared_organization_ids).find_each do |organization|
+  organization.update!(shared: false, updated_by_id: 1)
+  organizations_unshared << organization.id
+end
+
 kb_nl = ensure_kb(
   title:             'Prudai Docs - NL',
   locale:            nl_locale,
@@ -527,7 +557,9 @@ puts "__RESULT__#{JSON.generate(
   ticket_trigger_followup_id: ticket_trigger_followup.id,
   autoreply_trigger_id: autoreply_trigger.id,
   autoreply_trigger_followup_id: autoreply_trigger_followup.id,
-  autoreply_webhook_id: autoreply_webhook.id
+  autoreply_webhook_id: autoreply_webhook.id,
+  shared_organization_ids: shared_organization_ids,
+  organizations_unshared: organizations_unshared
 )}"
 RUBY
 )"
