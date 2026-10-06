@@ -1,15 +1,24 @@
+# Vertex-verwerking blijft in de EU (Beau 06-10-2026; Data Pro Statement art. 5):
+# beide modellen lopen via de jurisdictionele multiregio `eu` (.rep.-host).
+# Nooit terug naar `global`: die mag overal ter wereld verwerken.
 model_list:
   - model_name: gemini-support
     litellm_params:
       model: vertex_ai/gemini-3.6-flash
       vertex_project: os.environ/VERTEXAI_PROJECT_ID
       vertex_location: os.environ/VERTEXAI_LOCATION
+      # EU-multiregio, vast: LiteLLM bouwt voor "eu" anders de niet-bestaande
+      # host eu-aiplatform.googleapis.com. Pad = project/locatie/model.
+      api_base: https://aiplatform.eu.rep.googleapis.com/v1/projects/prudai/locations/eu/publishers/google/models/gemini-3.6-flash
       vertex_credentials: /etc/secrets/prudai-a6715982179f.json
   - model_name: gemini-support-fallback
     litellm_params:
       model: vertex_ai/gemini-3.5-flash
       vertex_project: os.environ/VERTEXAI_PROJECT_ID
       vertex_location: os.environ/VERTEXAI_LOCATION
+      # EU-multiregio, vast: LiteLLM bouwt voor "eu" anders de niet-bestaande
+      # host eu-aiplatform.googleapis.com. Pad = project/locatie/model.
+      api_base: https://aiplatform.eu.rep.googleapis.com/v1/projects/prudai/locations/eu/publishers/google/models/gemini-3.5-flash
       vertex_credentials: /etc/secrets/prudai-a6715982179f.json
 
 router_settings:
