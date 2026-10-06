@@ -31,7 +31,7 @@ LOGGER = logging.getLogger("prudai-autoreply")
 
 LOG_EVENT = "triage.shadow"
 DEFAULT_TIMEOUT_SECONDS = 10.0
-DEFAULT_MODEL = "vllm-sr/Decision-2.0-Kai-0.6B"
+DEFAULT_MODEL = "vllm-sr/Decision-2.0-Sol-2B"
 MAX_SUBJECT_CHARS = 300
 MAX_MESSAGE_CHARS = 2000
 MAX_DOC_PREVIEW_CHARS = 300
@@ -293,7 +293,7 @@ class TriageShadow:
                 {
                     "status": "error",
                     # Our own codes are content-free; anything else: class name only.
-                    "error": str(exc) if isinstance(exc, ShadowError) else type(exc).__name__,
+                    "error": str(exc),
                     "latency_ms": int((time.monotonic() - started) * 1000),
                 }
             )

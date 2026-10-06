@@ -390,5 +390,9 @@ def test_compose_defaults_keep_shadow_off(repo_root):
     text = (repo_root / "docker-compose.override.yml").read_text(encoding="utf-8")
     assert "TRIAGE_DECISION_SHADOW: ${TRIAGE_DECISION_SHADOW:-off}" in text
     assert "DECISION_SERVICE_URL: ${DECISION_SERVICE_URL:-}" in text
+    # Sol-2B: 0,92 vs Kai 0,82 on Dutch choices (measured 06-10); module and compose must agree.
+    assert ts.DEFAULT_MODEL == "vllm-sr/Decision-2.0-Sol-2B"
+    assert f"DECISION_SERVICE_MODEL: ${{DECISION_SERVICE_MODEL:-{ts.DEFAULT_MODEL}}}" in text
+    assert f"# DECISION_SERVICE_MODEL={ts.DEFAULT_MODEL}" in (repo_root / ".env.dist").read_text(encoding="utf-8")
     dockerfile = (repo_root / "docker" / "autoreply" / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY triage_shadow.py /app/triage_shadow.py" in dockerfile

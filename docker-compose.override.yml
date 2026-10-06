@@ -72,7 +72,7 @@ services:
       # Triage shadow measurement (decision model next to the LLM, logs only).
       # Off unless TRIAGE_DECISION_SHADOW=on AND DECISION_SERVICE_URL is set (.env).
       DECISION_SERVICE_URL: ${DECISION_SERVICE_URL:-}
-      DECISION_SERVICE_MODEL: ${DECISION_SERVICE_MODEL:-vllm-sr/Decision-2.0-Kai-0.6B}
+      DECISION_SERVICE_MODEL: ${DECISION_SERVICE_MODEL:-vllm-sr/Decision-2.0-Sol-2B}
       TRIAGE_DECISION_SHADOW: ${TRIAGE_DECISION_SHADOW:-off}
     depends_on:
       - litellm
