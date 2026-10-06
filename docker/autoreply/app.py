@@ -17,6 +17,8 @@ from typing import Any
 
 import requests
 
+from triage_shadow import TriageShadow
+
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -830,6 +832,8 @@ class AutoreplyService:
         self.support_escalation_from_name = (
             str(os.getenv("SUPPORT_ESCALATION_EMAIL_FROM_NAME") or "Prudai Support").strip()
         )
+        # Shadow-only decision model next to the LLM triage; off by default.
+        self.triage_shadow = TriageShadow.from_env()
 
     def is_authorized(self, header_value: str | None) -> bool:
         # ZAM-7: constant-time compare so the bearer check leaks no timing
@@ -882,6 +886,15 @@ class AutoreplyService:
         results = self._retrieve(ticket_title=ticket_title, customer_message=customer_message)
 
         decision = self._decide(ticket_title=ticket_title, customer_message=customer_message, language=language, results=results)
+        self._submit_triage_shadow(
+            ticket_id=ticket_id,
+            article_id=article_id,
+            articles=articles,
+            ticket_title=ticket_title,
+            customer_message=customer_message,
+            results=results,
+            decision=decision,
+        )
 
         if decision["priority"] == "high":
             self.zammad.update_ticket(ticket_id, priority_id=PRIORITY_IDS["high"])
@@ -935,6 +948,41 @@ class AutoreplyService:
             "applied_tags": applied_tags,
             "escalation_email_sent": escalation_email_sent,
         }
+
+    def _submit_triage_shadow(
+        self,
+        *,
+        ticket_id: int,
+        article_id: int,
+        articles: list[dict[str, Any]],
+        ticket_title: str,
+        customer_message: str,
+        results: list[SearchResult],
+        decision: dict[str, Any],
+    ) -> None:
+        """Queue the decision-model shadow comparison. Never raises, never changes ``decision``."""
+        if not self.triage_shadow.enabled:
+            return
+        try:
+            customer_article_ids = []
+            for item in articles:
+                sender = item.get("sender")
+                name = str(sender.get("name") or "") if isinstance(sender, dict) else str(sender or "")
+                if name.lower() == "customer":
+                    customer_article_ids.append(int(item.get("id") or 0))
+            self.triage_shadow.submit(
+                ticket_id=ticket_id,
+                article_id=article_id,
+                first_article=bool(customer_article_ids) and min(customer_article_ids) == article_id,
+                ticket_title=ticket_title,
+                customer_message=customer_message,
+                docs=[{"title": r.title, "preview": html_to_text(r.body_html or r.preview)} for r in results],
+                llm=decision.get("llm_triage"),
+                llm_ok=bool(decision.get("llm_ok")),
+                final={key: decision.get(key) for key in ("disposition", "category", "priority")},
+            )
+        except Exception as exc:  # noqa: BLE001 - shadow must never hurt the autoreply
+            LOGGER.warning("triage.shadow submit failed: %s", type(exc).__name__)
 
     def _article_marker(self, *, ticket_id: int, article_id: int) -> str:
         return f"{AUTOREPLY_MARKER_PREFIX}:ticket:{ticket_id}:article:{article_id}"
@@ -997,6 +1045,7 @@ class AutoreplyService:
         language: str,
         results: list[SearchResult],
     ) -> dict[str, Any]:
+        llm_ok = True
         try:
             raw_decision = self.litellm.generate_decision(
                 ticket_title=ticket_title,
@@ -1004,6 +1053,7 @@ class AutoreplyService:
                 results=results,
             )
         except Exception as exc:  # noqa: BLE001
+            llm_ok = False
             LOGGER.exception("LiteLLM decision generation failed: %s", exc)
             raw_decision = {
                 "disposition": DISPOSITION_HANDOFF,
@@ -1016,13 +1066,18 @@ class AutoreplyService:
                 "used_sources": [],
             }
 
-        return self._normalize_decision(
+        normalized = self._normalize_decision(
             decision=raw_decision,
             ticket_title=ticket_title,
             customer_message=customer_message,
             language=language,
             results=results,
         )
+        # For the triage shadow only: what the LLM itself chose, before the
+        # policy rules and fallbacks in _normalize_decision (None = no valid value).
+        normalized["llm_ok"] = llm_ok
+        normalized["llm_triage"] = _raw_llm_triage(raw_decision if isinstance(raw_decision, dict) else {})
+        return normalized
 
     def _normalize_decision(
         self,
@@ -1377,6 +1432,15 @@ class AutoreplyService:
             parts.append("</ul>")
 
         return "\n".join(parts)
+
+
+def _raw_llm_triage(raw: dict[str, Any]) -> dict[str, str | None]:
+    allowed = {"disposition": ALLOWED_DISPOSITIONS, "category": ALLOWED_CATEGORIES, "priority": ALLOWED_PRIORITIES}
+    out: dict[str, str | None] = {}
+    for field, options in allowed.items():
+        value = str(raw.get(field) or "").strip().lower()
+        out[field] = value if value in options else None
+    return out
 
 
 SERVICE = AutoreplyService()
