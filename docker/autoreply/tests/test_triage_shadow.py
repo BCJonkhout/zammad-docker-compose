@@ -304,13 +304,19 @@ def _process(app, monkeypatch, shadow):
 def test_process_ticket_result_identical_with_shadow_on_or_off(app, monkeypatch, caplog):
     off_result, off_writes = _process(app, monkeypatch, ts.TriageShadow(url="", enabled=False))
 
-    def exploding_post(*a, **k):
+    def slow_exploding_post(*a, **k):
+        time.sleep(0.6)
         raise RuntimeError("decision-service down")
 
-    on_shadow = _shadow(exploding_post)
+    on_shadow = _shadow(slow_exploding_post)
     with caplog.at_level(logging.INFO, logger="prudai-autoreply"):
+        t0 = time.monotonic()
         on_result, on_writes = _process(app, monkeypatch, on_shadow)
-        on_shadow._executor.shutdown(wait=True)
+        elapsed = time.monotonic() - t0
+        if on_shadow._executor is not None:
+            on_shadow._executor.shutdown(wait=True)
+
+    assert elapsed < 0.4, "the webhook waited for the decision model"
 
     assert on_result == off_result
     assert on_writes == off_writes
