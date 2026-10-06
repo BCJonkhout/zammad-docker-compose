@@ -293,7 +293,7 @@ class TriageShadow:
                 {
                     "status": "error",
                     # Our own codes are content-free; anything else: class name only.
-                    "error": str(exc),
+                    "error": str(exc) if isinstance(exc, ShadowError) else type(exc).__name__,
                     "latency_ms": int((time.monotonic() - started) * 1000),
                 }
             )
