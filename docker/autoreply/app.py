@@ -575,7 +575,7 @@ class ZammadClient:
         self.token = token
         self.session.headers["Authorization"] = f"Token token={token}"
 
-    def _refresh_token(self) -> bool:
+    def _refresh_token(self, sent_token: str) -> bool:
         if self.token_reader is None:
             return False
         try:
@@ -583,7 +583,10 @@ class ZammadClient:
         except (OSError, RuntimeError) as exc:
             LOGGER.warning("Could not re-read Zammad token after 401: %s", exc)
             return False
-        if fresh == self.token:
+        # Compare with the token THIS request carried, not self.token: with
+        # concurrent webhooks another thread may already have swapped it, and
+        # this request still deserves its one retry.
+        if fresh == sent_token:
             return False
         LOGGER.info("Zammad token changed on disk; retrying with the new token")
         self._set_token(fresh)
@@ -597,13 +600,14 @@ class ZammadClient:
         expected: tuple[int, ...] = (200,),
         json_body: dict[str, Any] | None = None,
     ) -> Any:
+        sent_token = self.token
         response = self.session.request(
             method=method,
             url=f"{self.base_url}{path}",
             json=json_body,
             timeout=REQUEST_TIMEOUT,
         )
-        if response.status_code == 401 and 401 not in expected and self._refresh_token():
+        if response.status_code == 401 and 401 not in expected and self._refresh_token(sent_token):
             response = self.session.request(
                 method=method,
                 url=f"{self.base_url}{path}",

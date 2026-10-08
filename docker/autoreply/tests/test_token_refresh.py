@@ -66,6 +66,31 @@ def test_unchanged_token_still_fails_without_a_retry(app):
     assert session.seen_tokens == ["old"]
 
 
-def test_service_wires_the_token_file_as_reader(app):
-    assert app.SERVICE.zammad.token_reader is not None
-    assert app.SERVICE.zammad.token_reader() == app.SERVICE.zammad.token
+def test_service_reader_follows_the_token_file(app):
+    """A closure over the boot value would pass an equality check; rewrite the file."""
+    import os
+    from pathlib import Path
+
+    token_file = Path(os.environ["ZAMMAD_AUTOREPLY_TOKEN_FILE"])
+    original = token_file.read_text(encoding="utf-8")
+    try:
+        token_file.write_text("rotated-token\n", encoding="utf-8")
+        assert app.SERVICE.zammad.token_reader() == "rotated-token"
+    finally:
+        token_file.write_text(original, encoding="utf-8")
+
+
+def test_concurrent_rotation_still_retries(app):
+    """Another thread already swapped self.token; this request still gets its retry."""
+    client, session = _client(app, boot_token="old", disk_token="new", valid_token="new")
+    real_request = session.request
+
+    def request_then_simulate_other_thread(**kwargs):
+        response = real_request(**kwargs)
+        if response.status_code == 401:
+            client._set_token("new")  # what a concurrent request's refresh did meanwhile
+        return response
+
+    session.request = request_then_simulate_other_thread
+    assert client.get_ticket_articles(30) == []
+    assert session.seen_tokens == ["old", "new"]
