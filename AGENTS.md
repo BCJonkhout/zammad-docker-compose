@@ -153,7 +153,8 @@ time here:
 - Rebuild and restart the support stack:
   - `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --build --force-recreate`
 - Rebuild only the AI autoreply service:
-  - `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --build --force-recreate zammad-autoreply`
+  - `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --build --force-recreate --no-deps zammad-autoreply`
+  - Keep `--no-deps`: without it `--force-recreate` also recreates `zammad-railsserver` and `zammad-nginx` (its dependencies), which takes support.prudai.com down for ~30 s (happened 08-10-2026).
 - Apply Prudai provisioning again:
   - `bash bin/provision-zammad.sh`
 - Check autoreply logs:
