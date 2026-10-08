@@ -13,7 +13,7 @@ from email.message import EmailMessage
 from html import escape, unescape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -554,17 +554,40 @@ class SearchResult:
 
 
 class ZammadClient:
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token: str, token_reader: Callable[[], str] | None = None) -> None:
         self.base_url = base_url.rstrip("/")
+        # The token file is rewritten when provisioning rotates the service
+        # token. Reading it once at boot left a container started 23 s before a
+        # rotation on 30-09-2026 answering every webhook with 401 for eight days
+        # (Zammad #59029 got no reply). On a 401 we re-read the file and retry.
+        self.token_reader = token_reader
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "Authorization": f"Token token={token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
                 "User-Agent": "prudai-zammad-autoreply/1.0",
             }
         )
+        self._set_token(token)
+
+    def _set_token(self, token: str) -> None:
+        self.token = token
+        self.session.headers["Authorization"] = f"Token token={token}"
+
+    def _refresh_token(self) -> bool:
+        if self.token_reader is None:
+            return False
+        try:
+            fresh = self.token_reader()
+        except (OSError, RuntimeError) as exc:
+            LOGGER.warning("Could not re-read Zammad token after 401: %s", exc)
+            return False
+        if fresh == self.token:
+            return False
+        LOGGER.info("Zammad token changed on disk; retrying with the new token")
+        self._set_token(fresh)
+        return True
 
     def request(
         self,
@@ -580,6 +603,13 @@ class ZammadClient:
             json=json_body,
             timeout=REQUEST_TIMEOUT,
         )
+        if response.status_code == 401 and 401 not in expected and self._refresh_token():
+            response = self.session.request(
+                method=method,
+                url=f"{self.base_url}{path}",
+                json=json_body,
+                timeout=REQUEST_TIMEOUT,
+            )
         if response.status_code not in expected:
             raise RuntimeError(f"{method} {path} failed with status {response.status_code}: {response.text[:800]}")
         if not response.text.strip():
@@ -810,6 +840,7 @@ class AutoreplyService:
         self.zammad = ZammadClient(
             base_url=getenv("ZAMMAD_INTERNAL_BASE_URL"),
             token=read_secret("ZAMMAD_AUTOREPLY_TOKEN_FILE"),
+            token_reader=lambda: read_secret("ZAMMAD_AUTOREPLY_TOKEN_FILE"),
         )
         self.litellm = LiteLLMClient(
             base_url=getenv("LITELLM_BASE_URL"),
