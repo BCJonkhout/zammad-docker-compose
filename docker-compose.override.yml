@@ -69,6 +69,11 @@ services:
       LITELLM_BASE_URL: http://litellm:4000/v1
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       LITELLM_MODEL: gemini-support
+      # Triage shadow measurement (decision model next to the LLM, logs only).
+      # Off unless TRIAGE_DECISION_SHADOW=on AND DECISION_SERVICE_URL is set (.env).
+      DECISION_SERVICE_URL: ${DECISION_SERVICE_URL:-}
+      DECISION_SERVICE_MODEL: ${DECISION_SERVICE_MODEL:-vllm-sr/Decision-2.0-Sol-2B}
+      TRIAGE_DECISION_SHADOW: ${TRIAGE_DECISION_SHADOW:-off}
     depends_on:
       - litellm
       - zammad-nginx
