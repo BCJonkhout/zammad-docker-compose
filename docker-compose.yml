@@ -81,6 +81,7 @@ x-shared:
 
 services:
   zammad-backup:
+    mem_limit: 256m
     <<: *zammad-service
     command: ["zammad-backup"]
     volumes:
@@ -91,6 +92,7 @@ services:
   zammad-elasticsearch:
     image: elasticsearch:${ELASTICSEARCH_VERSION:-9.3.2}
     restart: ${RESTART:-always}
+    mem_limit: 3g
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
     environment:
@@ -120,8 +122,10 @@ services:
     command: memcached -m 256M
     image: memcached:${MEMCACHE_VERSION:-1.6.41-alpine}
     restart: ${RESTART:-always}
+    mem_limit: 512m
 
   zammad-nginx:
+    mem_limit: 256m
     <<: *zammad-service
     command: ["zammad-nginx"]
     expose:
@@ -138,24 +142,29 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASS:-zammad}
     image: postgres:${POSTGRES_VERSION:-17.9-alpine}
     restart: ${RESTART:-always}
+    mem_limit: 512m
     volumes:
       - postgresql-data:/var/lib/postgresql/data
 
   zammad-railsserver:
+    mem_limit: 2g
     <<: *zammad-service
     command: ["zammad-railsserver"]
 
   zammad-redis:
     image: redis:${REDIS_VERSION:-8.6.1-alpine}
     restart: ${RESTART:-always}
+    mem_limit: 256m
     volumes:
       - redis-data:/data
 
   zammad-scheduler:
+    mem_limit: 1536m
     <<: *zammad-service
     command: ["zammad-scheduler"]
 
   zammad-websocket:
+    mem_limit: 512m
     <<: *zammad-service
     command: ["zammad-websocket"]
 
