@@ -34,7 +34,7 @@ docker run --rm -d --name "${rails}" --memory 3g --network "container:${pg}" "${
 
 scenario() {
   local out
-  out="$(docker exec -i -e SANDBOX_PHASE="$1" "${rails}" bash -lc \
+  out="$(docker exec -i -e SANDBOX_PHASE="$1" -e SANDBOX_EXPECT="${2:-}" "${rails}" bash -lc \
     'cat > /tmp/scenarios.rb && cd /opt/zammad && bundle exec rails runner /tmp/scenarios.rb' \
     < "${ROOT_DIR}/bin/email-channel-sandbox-scenarios.rb" 2>&1 | sed -n 's/^__SANDBOX__//p')"
   SANDBOX_JSON="${out:-[]}" python3 -c '
@@ -46,22 +46,36 @@ sys.exit(0 if rows and all(r["ok"] for r in rows) else 1)'
 }
 
 provision() {
-  ZAMMAD_RAILS_CONTAINER="${rails}" ZAMMAD_EMAIL_FOLDER_ID=sandbox-folder \
-    bash "${ROOT_DIR}/bin/provision-email-channel.sh" "$@" 2>/dev/null
+  ZAMMAD_RAILS_CONTAINER="${rails}" ZAMMAD_EMAIL_FOLDER_ID="${SANDBOX_FOLDER_ID-sandbox-folder}" \
+    bash "${ROOT_DIR}/bin/provision-email-channel.sh" "$@" 2>&1
 }
 
 changes() { python3 -c 'import json,sys; t=sys.stdin.read(); print(len(json.loads(t[t.index("{"):t.rindex("}")+1])["changes"]))'; }
+pass() { echo "PASS $*"; }
+fail() { echo "FAIL $*"; exit 1; }
 
 scenario fixture
 scenario link
 ZAMMAD_GRAPH_CLIENT_ID=sandbox-app ZAMMAD_GRAPH_CLIENT_SECRET=sandbox-secret ZAMMAD_GRAPH_TENANT_ID=sandbox-tenant \
-  provision apply >/dev/null
-[[ "$(provision apply | changes)" == 0 ]] && echo "PASS apply is idempotent" || { echo "FAIL apply not idempotent"; exit 1; }
-if provision activate >/dev/null; then echo "FAIL activate without go marker succeeded"; exit 1; else echo "PASS activate without go marker refused"; fi
-ZAMMAD_EMAIL_CHANNEL_GO="sandbox ${suffix}" provision activate >/dev/null && echo "PASS activate with go marker"
+  provision apply >/dev/null || fail "apply"
+[[ "$(provision apply | changes)" == 0 ]] && pass "apply is idempotent" || fail "apply not idempotent"
+scenario binding unbound
+if out="$(provision activate)"; then fail "activate without go marker succeeded"; fi
+grep -q "activate refused, failing guards: go_marker" <<<"${out}" && pass "activate without go marker refused (go_marker only)" \
+  || fail "activate failed for another reason: $(grep -m1 -i 'refused\|error' <<<"${out}")"
+ZAMMAD_EMAIL_CHANNEL_GO="sandbox ${suffix}" provision activate >/dev/null && pass "activate with go marker" || fail "activate"
+scenario binding bound
 scenario mail
-provision deactivate >/dev/null && echo "PASS deactivate"
-[[ "$(provision plan | changes)" == 0 ]] && echo "PASS plan after deactivate: 0 changes" || { echo "FAIL plan after deactivate"; exit 1; }
-
+provision deactivate >/dev/null && pass "deactivate" || fail "deactivate"
+scenario binding unbound
+[[ "$(provision plan | changes)" == 0 ]] && pass "plan after deactivate: 0 changes" || fail "plan after deactivate"
+# Re-authentication in the UI drops folder_id on a live channel; apply must switch it off.
+ZAMMAD_EMAIL_CHANNEL_GO="sandbox ${suffix}" provision activate >/dev/null || fail "re-activate"
+scenario reconnect
+SANDBOX_FOLDER_ID= provision apply >/dev/null || fail "apply on folderless channel"
+scenario reconnected
+provision apply >/dev/null && ZAMMAD_EMAIL_CHANNEL_GO="sandbox ${suffix}" provision activate >/dev/null \
+  && pass "folder restored and re-activated" || fail "re-activate after reconnect"
+provision deactivate >/dev/null || fail "final deactivate"
 echo "sandbox containers: ${pg} ${redis} ${rails}"
 echo "stop (removes them): docker stop ${rails} ${redis} ${pg}"

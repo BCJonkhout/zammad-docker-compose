@@ -192,12 +192,16 @@ def test_activate_requires_go_marker_and_safe_inbound(email_script):
     assert "bad << 'go_marker' if GO_MARKER.empty?" in block
     assert "keep_on_server" in block and "folder_id" in block and "shared_mailbox" in block
     assert 'raise "activate refused' in block
+    # an active channel that lost its folder (UI re-authentication) is switched off first
+    assert "unsafe_active = channel.active && inbound['folder_id'].blank? && FOLDER_ID.blank?" in ruby
+    assert "channel.active = false if unsafe_active" in ruby
+    assert "guard('seed_auto_replies_inactive'" in ruby
     assert "inbound['keep_on_server'] = true" in ruby
 
 
 def test_loop_filters_drop_own_mail(email_script):
     ruby = _ruby(email_script)
-    assert "'from' => { 'operator' => 'contains', 'value' => ADDRESS }" in ruby
+    assert "'from' => { 'operator' => 'matches regex', 'value' => \"(^|[^a-z0-9._%+-])#{Regexp.escape(ADDRESS)}($|[^a-z0-9.-])\" }" in ruby
     assert "'x-prudai-mail-kind' => { 'operator' => 'contains', 'value' => 'ai-escalation' }" in ruby
     assert "'x-zammad-ignore' => { 'value' => 'true' }" in ruby
 

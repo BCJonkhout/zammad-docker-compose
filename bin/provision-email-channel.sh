@@ -48,6 +48,7 @@ else
   rails_target=(zammad-railsserver)
 fi
 
+set +e
 raw_output="$(
   "${rails_exec[@]}" \
     -e PRUDAI_EMAIL_MODE="${mode}" \
@@ -195,8 +196,9 @@ ActiveRecord::Base.transaction do
   # Outlook/agent-mail sends that copy support@. Zammad's own outgoing mail is already
   # dropped by Channel::Filter::OwnNotificationLoopDetection (Message-ID @fqdn + bulk).
   {
+    # Anchored: "contains" would also drop it-support@ or support@prudai.com.example.
     'prudai ignore mail from own support address' => {
-      'from' => { 'operator' => 'contains', 'value' => ADDRESS },
+      'from' => { 'operator' => 'matches regex', 'value' => "(^|[^a-z0-9._%+-])#{Regexp.escape(ADDRESS)}($|[^a-z0-9.-])" },
     },
     'prudai ignore ai escalation notices' => {
       'x-prudai-mail-kind' => { 'operator' => 'contains', 'value' => 'ai-escalation' },
@@ -228,6 +230,11 @@ ActiveRecord::Base.transaction do
   end
   guard('ai_trigger_article_types', ai_types_ok, AI_ON_EMAIL ? 'phase 2: AI also answers e-mail' : 'phase 1: AI skips e-mail')
 
+  # Zammad's seeded auto replies would mail every customer who writes in. provision-zammad.sh
+  # switches them off; activate refuses if one is back on.
+  seeded_auto_replies = ['auto reply (on new tickets)', 'auto reply (on follow-up of tickets)']
+  guard('seed_auto_replies_inactive', Trigger.where(name: seeded_auto_replies, active: true).none?)
+
   # --- 5. The Graph channel (created by the OAuth step in the browser) -------------------
   channels = Channel.where(area: AREA).select { |c| channel_mailbox(c) == ADDRESS }
   raise "more than one #{AREA} channel for #{ADDRESS}: #{channels.map(&:id).inspect}" if channels.size > 1
@@ -241,15 +248,25 @@ ActiveRecord::Base.transaction do
     options = channel.options.deep_dup
     inbound = options['inbound']['options']
     inbound['keep_on_server'] = true
+
+    # Re-authenticating the account in the UI keeps the channel active but drops
+    # inbound folder_id (ExternalCredential::MicrosoftBase.link_account copies only
+    # :folder and :keep_on_server), so the next fetch would read the whole Inbox.
+    # An active channel without a folder is switched off first, on every run; the
+    # folder is looked up again only on a later run, while the channel is off.
+    unsafe_active = channel.active && inbound['folder_id'].blank? && FOLDER_ID.blank?
+    guard('active_channel_has_folder', !unsafe_active, unsafe_active ? 'active channel without folder_id: switched off' : nil)
+
     if FOLDER_ID.present?
       inbound['folder_id'] = FOLDER_ID
-    elsif inbound['folder_id'].blank? && MODE != 'plan'
+    elsif inbound['folder_id'].blank? && MODE != 'plan' && !unsafe_active
       inbound['folder_id'] = resolve_folder_id(channel)
       channel.reload
       options['auth'] = channel.options['auth']
     end
     channel.options = options
     channel.group_id = users_group.id
+    channel.active = false if unsafe_active
 
     case MODE
     when 'activate'
@@ -279,6 +296,9 @@ ActiveRecord::Base.transaction do
   end
 
   channel_live = channel.present? && channel.active
+  # Saving the EmailAddress fires EmailAddress#update_email_address_id, which binds a
+  # lone group behind our back -- reload, or the comparison below uses a stale nil.
+  users_group.reload
 
   # --- 6. Group binding follows the channel state ----------------------------------------
   # With a single group, EmailAddress#update_email_address_id binds Users to support@ the
@@ -289,7 +309,7 @@ ActiveRecord::Base.transaction do
   if channel_live
     if users_group.signature_id != signature.id
       preferences = (channel.preferences || {}).deep_dup
-      preferences[BINDING_KEY] = { 'signature_id' => users_group.signature_id }
+      preferences[BINDING_KEY] = { 'signature_id' => users_group.signature_id } # may be nil
       channel.preferences = preferences
       track("channel:#{channel.id}", channel)
     end
@@ -297,8 +317,8 @@ ActiveRecord::Base.transaction do
     users_group.signature_id = signature.id
   else
     users_group.email_address_id = nil if email_address && users_group.email_address_id == email_address.id
-    previous = channel && (channel.preferences || {}).dig(BINDING_KEY, 'signature_id')
-    users_group.signature_id = previous if previous && users_group.signature_id == signature.id
+    binding = channel && (channel.preferences || {})[BINDING_KEY]
+    users_group.signature_id = binding['signature_id'] if binding&.key?('signature_id') && users_group.signature_id == signature.id
   end
   track('group:Users', users_group)
 
@@ -385,11 +405,13 @@ end
 puts "__RESULT__#{JSON.generate(result)}"
 RUBY
 )"
+rails_status=$?
+set -e
 
 result_json="$(printf '%s\n' "${raw_output}" | sed -n 's/^__RESULT__//p' | tail -n 1)"
-if [[ -z "${result_json}" ]]; then
+if [[ ${rails_status} -ne 0 || -z "${result_json}" ]]; then
   printf '%s\n' "${raw_output}" | grep -v -i 'secret' >&2
-  echo "provision-email-channel: no result payload (mode ${mode}); nothing was committed." >&2
+  echo "provision-email-channel: failed (mode ${mode}, exit ${rails_status}); the transaction was rolled back, nothing was committed." >&2
   exit 1
 fi
 

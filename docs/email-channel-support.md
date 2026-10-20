@@ -61,9 +61,18 @@ Nadelen, met de maatregel:
   Exchange-licentie nodig heeft voor Graph-toegang tot een gedeelde box, is **niet geverifieerd**:
   dat zoekt de browseragent uit (prompt A, stap 7).
 - **Het clientgeheim verloopt** (advies: 24 maanden). Zammad kopieert het geheim bij het koppelen
-  in de kanaalopties, dus na vernieuwen moet het account opnieuw gekoppeld worden. Dat is
-  hetzelfde knopje, en het script behoudt map en `keep_on_server`. Zet de vervaldatum als taak in
-  CATO.
+  in de kanaalopties, dus na vernieuwen moet het account opnieuw gekoppeld worden. Zet de
+  vervaldatum als taak in CATO. **Let op bij herkoppelen:** Zammad neemt dan `keep_on_server` over,
+  maar `folder_id` niet, en het kanaal blijft aan. De volgende ophaalronde leest dan de hele Inbox
+  (`ExternalCredential::MicrosoftBase.link_account`, pad met `channel_id`). Daarom gaat
+  herkoppelen altijd zo:
+  1. `deactivate`;
+  2. in de UI opnieuw koppelen en de inbound-dialoog annuleren;
+  3. `apply`, dat de map opnieuw opzoekt;
+  4. `activate`.
+
+  Draait er toch een `apply` of `plan` op een actief kanaal zonder map, dan zet het script het
+  kanaal eerst uit (guard `active_channel_has_folder`).
 
 ## 4. Ontwerp
 
@@ -88,6 +97,9 @@ Toelichting bij de keuzes die niet vanzelf spreken:
   keer als nieuwe tickets importeren, inclusief de 19 escalatiemails. De kopieerregel stuurt alleen
   nieuwe mail naar `Zammad`; de Inbox en het doorsturen naar Beau en Geert blijven zoals ze zijn.
   Zammad markeert wat het verwerkt als gelezen, alleen in die map.
+- **Alleen ongelezen mail wordt opgehaald.** Met `keep_on_server` vraagt de driver alleen ongelezen
+  berichten op (`list_messages(unread_only: true)`). Open in de map `Zammad` dus niets met de hand:
+  een bericht dat daar als gelezen gemarkeerd is, wordt nooit een ticket. De Inbox is voor mensen.
 - **`keep_on_server = true` is een harde poort.** De standaard in de Zammad-UI is "nee", en dan
   *verwijdert* Zammad elk opgehaald bericht van de server (`MicrosoftGraph#delete_message`).
   `activate` weigert zonder.
@@ -134,6 +146,9 @@ Triggermail gaat nooit naar een eigen systeemadres en respecteert `send_no_auto_
 | R12 | Gespoofte mail met afzender support@ wordt genegeerd | gewenst. DMARC `p=quarantine` vangt het grootste deel al op |
 | R13 | De handtekening verliest de kleur van de links en de `<sup>`-stijl (Zammad-sanitizer) | cosmetisch; logo, keurmerken en voettekst blijven (als inline-PNG; externe afbeeldingen zou de sanitizer verwijderen) |
 | R14 | `provision-zammad.sh` herstartte bij de autoreply-recreate ook railsserver + nginx | in deze PR gerepareerd (`--no-deps`). Voor deze uitrol hoeft `provision-zammad.sh` niet te draaien |
+| R16 | Herkoppelen in de UI laat `folder_id` vallen terwijl het kanaal aan blijft: Zammad leest dan de Inbox (R1 opnieuw) | vaste procedure in §3 (eerst `deactivate`); elke `plan`/`apply` zet een actief kanaal zonder map direct uit; vervolgstap: een monitor die alarmeert bij een actief kanaal zonder map |
+| R17 | Fase 1: een afwezigheidsmelding van de klant geeft ook een staf-notificatie. Fase 2: klantmail die als auto-reply gemarkeerd is (`Precedence: bulk`, `Auto-Submitted`) krijgt geen AI-antwoord én geen staf-notificatie | fase 1 is alleen ruis. Voor fase 2 beoordelen we bij de fase-2-beslissing hoeveel van zulke mails er binnenkwamen (aantal tickets met `is-auto-response`) |
+| R18 | De seed-triggers `auto reply (on new tickets / follow-up)` gaan weer aan en mailen dan elke klant | `provision-zammad.sh` zet ze uit (in productie uit, gemeten); `activate` weigert als er één aan staat (guard `seed_auto_replies_inactive`) |
 | R15 | Klantmail staat nu ook in Zammad (bewaartermijn, ISMS) | zelfde regime als portaltickets; geen nieuwe categorie gegevens. Geen inhoud in commits, CATO of logs (alleen metaniveau) |
 
 ## 6. Uitrolstappen
@@ -161,7 +176,9 @@ Elke stap die iets live verandert, wacht op een expliciete go van Beau.
    - het bestaande doorsturen en de regels van support@ uitlezen.
 4. **Op de host:** `bin/provision-email-channel.sh apply`. Dit zoekt de map op via Graph, forceert
    `keep_on_server`, hernoemt het adres naar "Prudai Support" en ontkoppelt de groep weer. Daarna
-   `plan`: alle guards behalve de go-marker staan op `ok`.
+   `plan`: alle guards in de uitvoer staan op `ok`, en `keep_on_server: true` en
+   `folder_id_set: true`. De go-marker en `shared_mailbox` controleert `activate` zelf; die staan
+   niet in de guardlijst.
 5. **Activatie, in één sessie:**
    - prompt C (browser): de kopieerregel aanmaken;
    - op de host: `ZAMMAD_EMAIL_CHANNEL_GO="Beau <datum> <tijd>" bin/provision-email-channel.sh activate`.
@@ -182,7 +199,8 @@ Elke stap is los terug te draaien. Niets in deze uitrol verwijdert data.
 - Kopieerregel in support@ uitzetten (OWA, rechtstreeks in de regel).
 - Volledig: het kanaal verwijderen in Admin > Kanalen > Microsoft 365 Graph Email, de app-consent
   intrekken en het geheim verwijderen in Entra.
-- Fase 2 terugdraaien: `ZAMMAD_AI_ON_EMAIL=0` (of de variabele weghalen) en `apply`.
+- Fase 2 terugdraaien: `ZAMMAD_AI_ON_EMAIL` weghalen uit OpenBao (`kv/prod/zammad/app`),
+  `bao-fetch zammad`, daarna `apply`.
 - Al aangemaakte tickets blijven bestaan. Dat is gewenst: het zijn echte klantvragen.
 - Code: de PR reverten. De `app.py`-wijziging is los veilig: twee extra headers en een overslag op
   auto-replies.
@@ -208,10 +226,24 @@ zonder go-marker (geweigerd), `activate`, en daarna de mailscenario's door de ec
 7. Antwoord als e-mailartikel → geen extra notificatie; het artikel staat klaar om verstuurd te worden.
 8. Interne notitie → niets naar de klant.
 
-Daarna `deactivate`, en `plan` toont 0 wijzigingen. Uitkomst 20-10-2026: **alle checks PASS**.
-De unit- en contracttests staan in `docker/autoreply/tests/test_email_channel.py`. De
-breek-de-test-probe is gedaan: zonder de auto-reply-overslag of zonder de go-marker-poort worden
-de tests rood.
+Ook getest:
+
+- 3b: `it-support@prudai.com` valt niet onder het eigen-adresfilter.
+- De groepskoppeling na `apply`, `activate` en `deactivate`.
+- Het herkoppelen: een actief kanaal raakt zijn map kwijt, `apply` zet het uit, en daarna komt de
+  map terug en kan het kanaal weer aan.
+- `deactivate`, waarna `plan` 0 wijzigingen toont.
+
+Uitkomst 20-10-2026 (run `aae0c`, ná de auditfixes): **35/35 PASS**.
+
+Dekking eerlijk benoemd:
+
+- `docker/autoreply/tests/test_email_channel.py` test de `app.py`-wijzigingen en de handtekening
+  op gedrag (breek-de-test-probe: zonder de auto-reply-overslag wordt hij rood).
+- Voor de provisioning zijn het **contracttests op tekst**: ze vangen het weghalen van een regel,
+  niet een logicafout.
+- Het gedrag van de provisioning (poorten, koppeling, triggers, filters) dekt alleen de
+  sandbox-harness. Draai die na elke wijziging aan `provision-email-channel.sh`.
 
 ### 8b. Live (na activatie; testadres = een extern adres van Beau, bv. privé-Gmail)
 
@@ -222,7 +254,7 @@ de tests rood.
 | L3 | in | testadres antwoordt op L2 | hangt aan hetzelfde ticket; staf-notificatie bij de eigenaar + Beau/Geert | ticket-tijdlijn |
 | L4 | uit | publieke notitie (of portalantwoord) op een portalticket van het testaccount | testadres krijgt de trigger-mail met antwoord + link naar het portaal | testadres |
 | L5 | in (lus) | afwezigheidsmelding aanzetten op het testadres, Beau antwoordt nog een keer | de afwezigheidsmelding landt als artikel met `is-auto-response`; geen nieuwe mail naar het testadres | ticket; testadres |
-| L6 | in (lus) | een AI-escalatie op een portalticket uitlokken | de escalatiemail naar support@ wordt **geen** ticket (filter); hij staat wel in de Inbox | aantal tickets; Inbox support@ |
+| L6 | in (lus) | een AI-escalatie op een portalticket uitlokken | de escalatiemail naar support@ wordt **geen** ticket (filter); hij staat wel in de Inbox **en komt nog steeds doorgestuurd aan bij Beau/Geert** (de nieuwe header `Auto-Submitted: auto-generated` kan doorsturen beïnvloeden; dat is niet geverifieerd) | aantal tickets; Inbox support@; inbox Beau |
 | L7 | M365 | na de tests | de berichten in map `Zammad` zijn gelezen en **niet** verwijderd; de Inbox is onveranderd | OWA support@ |
 | L8 | terugrol | `deactivate` + `plan`, daarna weer `activate` | kanaal uit/aan zonder fouten; groepskoppeling volgt | uitvoer van het script |
 
@@ -326,7 +358,9 @@ bin/provision-email-channel.sh plan          # alleen lezen (transactie met roll
 bin/provision-email-channel.sh apply         # idempotent; zet niets aan
 ZAMMAD_EMAIL_CHANNEL_GO="Beau 2026-10-2x 10:00" bin/provision-email-channel.sh activate
 bin/provision-email-channel.sh deactivate    # terugrol
-ZAMMAD_AI_ON_EMAIL=1 bin/provision-email-channel.sh apply   # fase 2 (zet de variabele ook in .env)
+# fase 2: ZAMMAD_AI_ON_EMAIL=1 in OpenBao kv/prod/zammad/app zetten, `bao-fetch zammad`
+# (.env wordt in zijn geheel gerenderd, nooit met de hand), daarna:
+bin/provision-email-channel.sh apply   # en bij een volgende provision-zammad.sh-run blijft het zo
 bin/test-email-channel-sandbox.sh <suffix>   # wegwerp-Zammad; stop daarna de drie containers
 ```
 

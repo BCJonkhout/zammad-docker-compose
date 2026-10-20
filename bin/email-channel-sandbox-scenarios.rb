@@ -65,7 +65,33 @@ when 'fixture'
       perform:   { 'notification.webhook' => { 'webhook_id' => webhook.id } }
     )
   end
+  # provision-zammad.sh switches Zammad's seeded auto replies off; so does production.
+  Trigger.where(name: ['auto reply (on new tickets)', 'auto reply (on follow-up of tickets)']).find_each { |t| t.update!(active: false) }
   check(results, 'fixture: single group without e-mail address', Group.count == 1 && Group.first.email_address_id.nil?)
+
+when 'binding'
+  # SANDBOX_EXPECT=unbound: Users has no e-mail address and its original signature;
+  # bound: Users sends as support@ with "Prudai Support".
+  group = Group.find_by!(name: 'Users')
+  if ENV.fetch('SANDBOX_EXPECT') == 'bound'
+    check(results, 'binding: Users bound to support@ + Prudai Support', group.email_address&.email == ADDRESS && group.signature&.name == 'Prudai Support',
+          [group.email_address&.email, group.signature&.name].inspect)
+  else
+    check(results, 'binding: Users unbound, original signature', group.email_address_id.nil? && group.signature&.name == 'default',
+          [group.email_address&.email, group.signature&.name].inspect)
+  end
+
+when 'reconnect'
+  # What the UI's re-authentication does (MicrosoftBase.link_account, channel_id path):
+  # options are rebuilt, folder_id is not carried over, the channel stays active.
+  c = channel
+  options = c.options.deep_dup
+  options['inbound']['options'].delete('folder_id')
+  c.update!(options: options)
+  check(results, 'reconnect: active channel lost its folder_id', c.reload.active && c.options.dig('inbound', 'options', 'folder_id').blank?)
+
+when 'reconnected'
+  check(results, 'reconnected: apply switched the folderless channel off', channel && !channel.active)
 
 when 'link'
   c = Channel.create!(
@@ -108,6 +134,11 @@ when 'mail'
   deliver(mail(from: "Prudai Support <#{ADDRESS}>", subject: 'Prudai AI escalation (iets)'))
   check(results, '3 mail from own address is ignored', Ticket.count == tickets_before)
 
+  # 3b. A different address that merely contains support@prudai.com -> not ignored.
+  deliver(mail(from: 'it-support@prudai.com', subject: 'Andere afzender'))
+  check(results, '3b it-support@ is not caught by the own-address filter', Ticket.count == tickets_before + 1)
+  tickets_before = Ticket.count
+
   # 4. Escalation notice marked by header, even from another sender -> ignored.
   deliver(mail(from: 'alerts@prudai.com', subject: 'Prudai AI escalation (x)', headers: { 'X-Prudai-Mail-Kind' => 'ai-escalation' }))
   check(results, '4 ai-escalation header is ignored', Ticket.count == tickets_before)
@@ -135,13 +166,14 @@ when 'mail'
   check(results, '6 notice carries the reply text', body.include?('Zo werkt X: stap 1.'))
   check(results, '6 notice carries signature + confidentiality footer', body.include?('Prudai Support') && body.include?('vertrouwelijk en uitsluitend bestemd voor'))
   check(results, '6 notice has no unrendered placeholders', !body.include?('#{'))
-  # The stored subject is plain; TicketArticleCommunicateEmailJob adds the hook on send.
-  sent_subject = portal.subject_build(notice&.subject.to_s)
-  check(results, '6 sent subject carries the ticket hook', sent_subject.include?(portal.number.to_s), sent_subject)
+  # Stored subject is the rendered title; TicketArticleCommunicateEmailJob adds the
+  # [Ticket#…] hook on send (app/jobs/ticket_article_communicate_email_job.rb:31).
+  check(results, '6 notice subject is the rendered ticket title', notice&.subject == 'Portalvraag', notice&.subject)
   check(results, '6 notice is sent from the support address', notice&.from.to_s.include?(ADDRESS), notice&.from)
 
   # 7. Agent replies by e-mail -> Zammad sends that article itself; no extra notice.
   system_before = Ticket::Article.where(ticket_id: portal.id, sender: Ticket::Article::Sender.lookup(name: 'System')).count
+  jobs_before = jobs_like('TicketArticleCommunicateEmailJob')
   Ticket::Article.create!(ticket: portal, type: Ticket::Article::Type.lookup(name: 'email'), sender: Ticket::Article::Sender.lookup(name: 'Agent'),
                           from: "Prudai Support <#{ADDRESS}>", to: CUSTOMER, subject: 'Re: Portalvraag', body: 'Per mail.', internal: false,
                           created_by_id: agent.id, updated_by_id: agent.id)
@@ -151,7 +183,7 @@ when 'mail'
   TransactionDispatcher.commit
   system_after = Ticket::Article.where(ticket_id: portal.id, sender: Ticket::Article::Sender.lookup(name: 'System')).count
   check(results, '7+8 no notice for e-mail replies or internal notes', system_after == system_before, "delta=#{system_after - system_before}")
-  check(results, '7 agent e-mail reply queued for sending', jobs_like('CommunicateEmailJob') >= 1, "jobs=#{jobs_like('CommunicateEmailJob')}")
+  check(results, '7 agent e-mail reply queued for sending', jobs_like('TicketArticleCommunicateEmailJob') == jobs_before + 1, "delta=#{jobs_like('TicketArticleCommunicateEmailJob') - jobs_before}")
 
   Delayed::Job.delete_all # nothing in the sandbox may try to deliver anything
 end
