@@ -535,6 +535,20 @@ def fence_customer_input(*, ticket_title: str, customer_message: str) -> str:
     )
 
 
+def is_auto_response_article(article: dict[str, Any]) -> bool:
+    """True for mail Zammad's AutoResponseCheck filter flagged as an auto-reply.
+
+    The filter stores ``is-auto-response`` in the article preferences for every
+    inbound e-mail (Auto-Submitted, Precedence bulk/list/junk, X-Loop,
+    X-Auto-Response-Suppress: All -- which is how Outlook marks out-of-office).
+    Portal articles never carry the key.
+    """
+    preferences = article.get("preferences") or {}
+    if not isinstance(preferences, dict):
+        return False
+    return str(preferences.get("is-auto-response", "")).strip().lower() in {"true", "1", "yes"}
+
+
 def sanitize_tag(value: str) -> str | None:
     normalized = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
     if not normalized:
@@ -914,6 +928,10 @@ class AutoreplyService:
             sender_name = str(sender_value or "")
         if sender_name.lower() != "customer":
             return {"status": "skipped", "reason": "non_customer_article", "ticket_id": ticket_id}
+        if is_auto_response_article(source_article):
+            # Out-of-office and other auto-replies arriving over the e-mail channel:
+            # answering them only feeds the next auto-reply (mail loop).
+            return {"status": "skipped", "reason": "auto_response_article", "ticket_id": ticket_id}
 
         ticket_title = str(ticket.get("title") or source_article.get("subject") or "").strip()
         customer_message = html_to_text(str(source_article.get("body") or ""))
@@ -1265,6 +1283,13 @@ class AutoreplyService:
         message["Subject"] = subject
         message["From"] = f"{self.support_escalation_from_name} <{self.support_escalation_from}>"
         message["To"] = ", ".join(self.support_escalation_recipients)
+        # This notice goes to support@, which is also the Zammad e-mail channel: the
+        # postmaster filter "prudai ignore ai escalation notices" drops it on this header
+        # (bin/provision-email-channel.sh), and the auto-submitted pair keeps
+        # out-of-office replies from answering it.
+        message["X-Prudai-Mail-Kind"] = "ai-escalation"
+        message["Auto-Submitted"] = "auto-generated"
+        message["X-Auto-Response-Suppress"] = "All"
         message.set_content(text_body)
         message.add_alternative(html_body, subtype="html")
 
