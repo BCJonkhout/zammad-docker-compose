@@ -61,8 +61,13 @@ class FakeCato:
             return [c for c in self.companies
                     if d in (c["domainName"].get("primaryLinkUrl") or "")]
         if a[:2] == ["notes", "list"]:
-            t = a[a.index("--title") + 1]
-            rows = [n for n in self.notes if t.lower() in n["title"].lower()]  # ilike
+            rows = list(self.notes)
+            if "--title" in a:                   # ilike: hoofdletterongevoelig
+                t = a[a.index("--title") + 1].lower()
+                rows = [n for n in rows if t in n["title"].lower()]
+            if "--company-id" in a:
+                cid = a[a.index("--company-id") + 1]
+                rows = [n for n in rows if n.get("company") == cid]
             if "--open" in a:
                 rows = [n for n in rows if n.get("afhandeling") == "OPEN"]
             return rows
@@ -120,6 +125,21 @@ class Tests(unittest.TestCase):
         self.assertIn("Categorie: bug", body)
         self.assertIn("Signalen: security", body)
         self.assertIn(zcm.HANDTEKENING, body)
+        self.assertTrue(body.startswith("Bron: Zammad #59100\n"))     # cato guide §7
+        self.assertIn("Eerder: geen meldingen", body)
+
+    def test_eerdere_meldingen_worden_genoemd(self):
+        cato = FakeCato(self.companies, [
+            {"id": "o1", "title": "Klantmelding 01-09-2026 — x", "afhandeling": "OPEN",
+             "company": "c-kantoor", "createdAt": "2026-09-01T10:00:00Z"},
+            {"id": "o2", "title": "Incident 05-09-2026 — y", "afhandeling": "OPGELOST",
+             "company": "c-kantoor", "createdAt": "2026-09-05T10:00:00Z"}])
+        zcm.ronde(FakeZammad([ticket(1, 59100, "a@kantoor.nl")]), cato, SINDS, True)
+        self.assertIn(("notes", "list", "--soort", "KLANTMELDING,INCIDENT", "--company-id",
+                       "c-kantoor", "--all", "--json"), cato.calls)
+        self.assertEqual(cato.notes[-1]["title"], "Klantmelding 11-10-2026 — Zammad #59100 geëscaleerd")
+        self.assertIn("Eerder: 2 meldingen/incidenten, laatste vastgelegd 05-09-2026, waarvan 1 nog open.",
+                      zcm.eerder_regel(cato.notes[:2]))
 
     def test_substring_domein_is_geen_treffer(self):
         # 'kantoor.nl' vindt via --domain ook 'grabkantoor.nl'; exact blijft er één over

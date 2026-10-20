@@ -125,19 +125,34 @@ def nl_datum(iso: str) -> str:
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TZ).strftime("%d-%m-%Y")
 
 
-def notitie(ticket: dict[str, Any], tags: list[str]) -> tuple[str, str]:
+def eerder_regel(eerder: list[dict[str, Any]]) -> str:
+    """`cato guide` §7: noem eerdere meldingen/incidenten van deze relatie."""
+    if not eerder:
+        return "Eerder: geen meldingen of incidenten vastgelegd."
+    laatste = max(n["createdAt"] for n in eerder)
+    open_n = sum(1 for n in eerder if n.get("afhandeling") == "OPEN")
+    return (f"Eerder: {len(eerder)} meldingen/incidenten, laatste vastgelegd {nl_datum(laatste)}"
+            + (f", waarvan {open_n} nog open." if open_n else "."))
+
+
+def notitie(ticket: dict[str, Any], tags: list[str],
+            eerder: list[dict[str, Any]] | None = None) -> tuple[str, str]:
     """Titel + body, alleen metadata. De datum vooraan in de titel is wat
-    /cato-agenda en /cato-groom als gebeurtenisdatum lezen."""
+    /cato-agenda en /cato-groom als gebeurtenisdatum lezen; de eerste bodyregel
+    `Bron: Zammad #…` is de vorm die `cato guide` §7 voorschrijft."""
     nummer, datum = ticket["number"], nl_datum(ticket["created_at"])
     categorie = next((t[len("topic-"):] for t in sorted(tags) if t.startswith("topic-")), None)
     signalen = sorted(t[len("escalation-"):] for t in tags if t.startswith("escalation-"))
     titel = f"Klantmelding {datum} — Zammad #{nummer} geëscaleerd"
     body = "\n".join([
+        f"Bron: Zammad #{nummer}",
+        "",
         f"Zammad-ticket [#{nummer}]({ZAMMAD_PUBLIC}/#ticket/zoom/{ticket['id']}) is door de "
         f"AI-triage geëscaleerd naar een medewerker (ticket aangemaakt {datum}).",
         "",
         f"- Categorie: {categorie or 'onbekend'}",
         f"- Signalen: {', '.join(signalen) if signalen else 'geen'}",
+        f"- {eerder_regel(eerder or [])}",
         "",
         "De inhoud staat in Zammad en hoort niet in CATO. Afhandeling springt vanzelf op "
         "OPGELOST zodra het ticket in Zammad gesloten is.",
@@ -259,10 +274,12 @@ def verwerk_ticket(z: Zammad, run_cato: Callable[..., Any], t: dict[str, Any],
     if any(noemt_ticket(n.get("title"), t["number"]) for n in bestaand):
         telling["al_genoteerd"] += 1
         return
-    titel, body = notitie(t, z.tags(t["id"]))
     if not schrijven:
         telling["zou_aanmaken"] += 1
         return
+    eerder = run_cato("notes", "list", "--soort", "KLANTMELDING,INCIDENT", "--company-id",
+                      bedrijf["id"], "--all", "--json") or []
+    titel, body = notitie(t, z.tags(t["id"]), eerder)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write(body)
     # Al dicht in Zammad (bv. bij terugvullen met --since): meteen OPGELOST vastleggen.
