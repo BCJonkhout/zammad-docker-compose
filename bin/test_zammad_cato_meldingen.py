@@ -21,9 +21,10 @@ spec.loader.exec_module(zcm)
 SINDS = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 
-def ticket(tid, nummer, email, created="2026-10-10T22:30:00Z", state="open"):
+def ticket(tid, nummer, email, created="2026-10-10T22:30:00Z", state="open", updated=None):
     return {"id": tid, "number": str(nummer), "customer_id": 1000 + tid,
-            "created_at": created, "state": state, "_email": email}
+            "created_at": created, "updated_at": updated or created, "state": state,
+            "_email": email}
 
 
 class FakeZammad:
@@ -32,17 +33,18 @@ class FakeZammad:
         self.alle = alle if alle is not None else tickets
 
     def escalaties(self, sinds):
-        return [t for t in self.tickets
-                if datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")) >= sinds]
+        return [t for t in self.tickets if zcm.in_venster(t, sinds)]
 
     def email(self, uid):
+        if uid == "kapot":
+            raise TimeoutError("zammad traag")
         return next(t["_email"] for t in self.tickets + self.alle if t["customer_id"] == uid)
 
     def tags(self, tid):
         return self._tags.get(tid, [])
 
-    def ticket_op_nummer(self, nummer):
-        return next((t for t in self.alle if t["number"] == str(nummer)), None)
+    def ticket(self, tid):
+        return next(t for t in self.alle if t["id"] == tid)
 
 
 class FakeCato:
@@ -60,13 +62,14 @@ class FakeCato:
                     if d in (c["domainName"].get("primaryLinkUrl") or "")]
         if a[:2] == ["notes", "list"]:
             t = a[a.index("--title") + 1]
-            rows = [n for n in self.notes if t in n["title"]]
+            rows = [n for n in self.notes if t.lower() in n["title"].lower()]  # ilike
             if "--open" in a:
                 rows = [n for n in rows if n.get("afhandeling") == "OPEN"]
             return rows
         if a[:2] == ["notes", "create"]:
             self.notes.append({"id": f"new{len(self.notes)}", "title": a[a.index("--title") + 1],
-                               "afhandeling": "OPEN", "company": a[a.index("--company-id") + 1]})
+                               "afhandeling": a[a.index("--afhandeling") + 1],
+                               "company": a[a.index("--company-id") + 1]})
             return {}
         if a[:2] == ["notes", "update"]:
             n = next(n for n in self.notes if n["id"] == a[2])
@@ -111,7 +114,7 @@ class Tests(unittest.TestCase):
 
     def test_body_bevat_alleen_metadata(self):
         t = dict(ticket(1, 59100, "a@kantoor.nl"), title="Geheim dossieronderwerp")
-        _, body = zcm.notitie(t, ["topic-bug", "escalation-security", "escalation-email"])
+        _, body = zcm.notitie(t, ["topic-bug", "escalation-security", "ai-escalation-email-12"])
         self.assertNotIn("Geheim", body)
         self.assertNotIn("kantoor", body)
         self.assertIn("Categorie: bug", body)
@@ -154,7 +157,7 @@ class Tests(unittest.TestCase):
     def test_droogloop_schrijft_niets(self):
         dicht = ticket(9, 59000, "a@kantoor.nl", created="2026-09-01T10:00:00Z", state="closed")
         notes = [{"id": "e1", "title": "Klantmelding 01-09-2026 — Zammad #59000 geëscaleerd",
-                  "afhandeling": "OPEN", "bodyV2": {"markdown": zcm.HANDTEKENING}}]
+                  "afhandeling": "OPEN", "bodyV2": {"markdown": "(x/#ticket/zoom/9)\n" + zcm.HANDTEKENING}}]
         tel, cato = self.run_ronde([ticket(1, 59100, "a@kantoor.nl")], notes=notes,
                                    schrijven=False, alle=[dicht])
         self.assertEqual((tel["zou_aanmaken"], tel["zou_oplossen"]), (1, 1))
@@ -169,28 +172,101 @@ class Tests(unittest.TestCase):
         nog = ticket(8, 59001, "a@kantoor.nl", created="2026-09-01T10:00:00Z", state="open")
         notes = [
             {"id": "e1", "title": "Klantmelding 01-09-2026 — Zammad #59000 geëscaleerd",
-             "afhandeling": "OPEN", "bodyV2": {"markdown": "x\n_" + zcm.HANDTEKENING + "_"}},
+             "afhandeling": "OPEN",
+             "bodyV2": {"markdown": "[#59000](https://s/#ticket/zoom/9)\n_" + zcm.HANDTEKENING + "_"}},
             {"id": "e2", "title": "Klantmelding 01-09-2026 — Zammad #59001 geëscaleerd",
-             "afhandeling": "OPEN", "bodyV2": {"markdown": zcm.HANDTEKENING}},
+             "afhandeling": "OPEN",
+             "bodyV2": {"markdown": "[#59001](https://s/#ticket/zoom/8)\n" + zcm.HANDTEKENING}},
+            {"id": "e3", "title": "Klantmelding 01-09-2026 — Zammad #59002 geëscaleerd",
+             "afhandeling": "OPEN",
+             "bodyV2": {"markdown": "[#59002](https://s/#ticket/zoom/7)\n" + zcm.HANDTEKENING}},
             # handwerk (geen handtekening) over een dicht ticket: niet aankomen
             {"id": "m1", "title": "Klantmelding — Zammad #59000 nagebeld", "afhandeling": "OPEN",
              "bodyV2": {"markdown": "door Beau"}},
         ]
-        tel, cato = self.run_ronde([], notes=notes, alle=[dicht, nog])
-        self.assertEqual(tel["opgelost"], 1)
+        samengevoegd = ticket(7, 59002, "a@kantoor.nl", created="2026-09-01T10:00:00Z",
+                              state="merged")
+        tel, cato = self.run_ronde([], notes=notes, alle=[dicht, nog, samengevoegd])
+        self.assertEqual(tel["opgelost"], 2)
         updates = [c for c in cato.calls if c[:2] == ("notes", "update")]
-        self.assertEqual([c[2] for c in updates], ["e1"])
+        self.assertEqual(sorted(c[2] for c in updates), ["e1", "e3"])
 
     def test_helpers(self):
         self.assertEqual(zcm.host("https://WWW.Kantoor.nl/pad?x"), "kantoor.nl")
         self.assertEqual(zcm.host("kantoor.nl"), "kantoor.nl")
         self.assertEqual(zcm.mail_domein("A@Kantoor.NL"), "kantoor.nl")
         self.assertEqual(zcm.overslaan_reden("mail.prudai.com"), "prudai_zelf")
-        self.assertEqual(zcm.ticketnummer_uit("Klantmelding — Zammad #59027 x"), "59027")
-        self.assertIsNone(zcm.ticketnummer_uit("geen nummer"))
+        self.assertEqual(zcm.ticket_id_uit("[#59027](https://s/#ticket/zoom/412) x"), 412)
+        self.assertIsNone(zcm.ticket_id_uit("geen link"))
+        self.assertEqual(zcm.primair_domein(bedrijf("c", "https://WWW.Kantoor.nl/")), "kantoor.nl")
+
+    def test_al_dicht_ticket_wordt_meteen_opgelost_vastgelegd(self):
+        tel, cato = self.run_ronde([ticket(1, 59100, "a@kantoor.nl", state="closed")])
+        self.assertEqual(tel["aangemaakt_opgelost"], 1)
+        self.assertEqual(cato.notes[-1]["afhandeling"], "OPGELOST")
+
+    def test_venster_oud_open_en_bijgewerkt_telt_oud_dicht_niet(self):
+        oud_open = ticket(1, 1, "a@kantoor.nl", created="2026-08-01T10:00:00Z",
+                          updated="2026-10-05T10:00:00Z")
+        oud_dicht = ticket(2, 2, "a@kantoor.nl", created="2026-08-01T10:00:00Z",
+                           updated="2026-10-05T10:00:00Z", state="closed")
+        oud_stil = ticket(3, 3, "a@kantoor.nl", created="2026-08-01T10:00:00Z",
+                          updated="2026-08-02T10:00:00Z")
+        self.assertEqual([zcm.in_venster(t, SINDS) for t in (oud_open, oud_dicht, oud_stil)],
+                         [True, False, False])
+
+    def test_een_kapot_ticket_stopt_de_rest_niet(self):
+        kapot = dict(ticket(1, 1, "x"), customer_id="kapot")
+        tel, _ = self.run_ronde([kapot, ticket(2, 59100, "a@kantoor.nl")])
+        self.assertEqual((tel["fout_TimeoutError"], tel["aangemaakt"]), (1, 1))
 
     def test_halve_vlaggen_weigeren(self):
         self.assertEqual(zcm.main(["--no-dry-run"]), 2)
+
+
+class ZammadIO(unittest.TestCase):
+    """De echte Zammad-klasse met een nep-HTTP-laag: zoekweg, paginering en venster."""
+
+    def maak(self, paginas):
+        z = zcm.Zammad("http://x/api/v1", "t")
+        z.posts = []
+
+        def post(path, body):
+            z.posts.append((path, body))
+            return paginas[body["page"] - 1] if body["page"] <= len(paginas) else []
+        z.post = post
+        return z
+
+    def test_zoekt_via_sql_conditie_niet_via_elasticsearch(self):
+        z = self.maak([[]])
+        z.escalaties(SINDS)
+        path, body = z.posts[0]
+        self.assertEqual(path, "/tickets/search")
+        self.assertNotIn("query", body)
+        self.assertEqual(body["condition"]["ticket.tags"]["value"], "ai-escalate")
+
+    def test_paginering_loopt_door_tot_een_korte_pagina(self):
+        vol = [ticket(i, i, "a@b.nl") for i in range(zcm.PAGINA)]
+        z = self.maak([vol, vol, [ticket(999, 999, "a@b.nl")]])
+        self.assertEqual(len(z.escalaties(SINDS)), 2 * zcm.PAGINA + 1)
+        self.assertEqual([b["page"] for _, b in z.posts], [1, 2, 3])
+
+    def test_venster_wordt_echt_toegepast(self):
+        z = self.maak([[ticket(1, 1, "a@b.nl"), ticket(2, 2, "a@b.nl", created="2026-08-01T00:00:00Z")]])
+        self.assertEqual([t["id"] for t in z.escalaties(SINDS)], [1])
+
+    def test_geen_lijst_is_een_fout_geen_lege_run(self):
+        z = self.maak([{"error": "es down"}])
+        with self.assertRaises(RuntimeError):
+            z.escalaties(SINDS)
+
+    def test_main_eindigt_met_1_bij_een_fout(self):
+        echt = zcm.TOKEN_FILE
+        zcm.TOKEN_FILE = "/nonexistent/token"
+        try:
+            self.assertEqual(zcm.main([]), 1)
+        finally:
+            zcm.TOKEN_FILE = echt
 
 
 if __name__ == "__main__":

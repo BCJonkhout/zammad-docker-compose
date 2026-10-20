@@ -7,17 +7,22 @@
 
 Wat het doet:
 1. Zoekt in Zammad de tickets met tag `ai-escalate` (gezet door zammad-autoreply
-   als de AI-triage een ticket naar een medewerker escaleert), aangemaakt sinds
-   `--since` (standaard 14 dagen terug).
+   als de AI-triage een ticket naar een medewerker escaleert), bijgewerkt sinds
+   `--since` (standaard 14 dagen terug), plus oudere tickets die nog open staan en
+   sindsdien zijn bijgewerkt (een vervolgbericht dat later escaleert). Zoeken gaat via een SQL-conditie,
+   níet via de Elasticsearch-zoekopdracht: die geeft bij een ES-fout een lege lijst
+   met HTTP 200 terug, en de live index miste op 20-10-2026 één van de 17 tickets.
 2. Koppelt elk ticket aan een CATO-bedrijf via het e-maildomein van de klant: alleen
-   bij precies één bedrijf met exact dat domein is het een "bekende klantorganisatie".
+   bij precies één bedrijf met exact dat domein als **primair** domein is het een
+   "bekende klantorganisatie" (`cato companies list --domain` zoekt alleen daarop).
    Gratis mail, Prudai zelf, geen of meerdere treffers → overslaan (geteld, niet
    geraden). Zammad-organisaties helpen hier niet: op 20-10-2026 had 1 van de 16
    geëscaleerde tickets er een.
-3. Bestaat er voor dat bedrijf nog geen notitie met `#<ticketnummer>` in de titel,
-   dan maakt hij er een aan via de cato-CLI: soort KLANTMELDING, afhandeling OPEN.
+3. Noemt nog geen enkele CATO-notitie `#<ticketnummer>` in de titel (ook handwerk,
+   aan welk bedrijf of persoon ook), dan maakt hij er een aan via de cato-CLI: soort KLANTMELDING, afhandeling OPEN.
 4. Notities die dít script eerder maakte en nog OPEN staan, zet hij op OPGELOST zodra
-   het ticket in Zammad gesloten of samengevoegd is — anders blijft de groom elke
+   het ticket in Zammad gesloten of samengevoegd is (ticket gelezen op id uit de link
+   in de notitie, rechtstreeks uit de database) — anders blijft de groom elke
    week vragen naar meldingen die allang klaar zijn.
 
 Waarom een host-script en niet in zammad-autoreply zelf: het enige schrijfpad naar
@@ -29,8 +34,13 @@ Vertrouwelijkheid: de notitie bevat alleen metadata — ticketnummer + link, dat
 categorie- en signaaltags. Geen onderwerp, geen berichttekst, geen namen; de inhoud
 blijft in Zammad. De uitvoer van dit script telt alleen (geen domeinen of namen).
 
+Fouten: één ticket dat misgaat stopt de rest niet; het telt als `fout_<klasse>` en de
+run eindigt met exit 1, zodat systemd hem als mislukt toont.
+
 Leest Zammad met het bestaande autoreply-token (ticket.agent; tickets zoeken,
-gebruikers en tags lezen). Schrijft niets in Zammad."""
+gebruikers en tags lezen). Schrijft niets in Zammad. Gebeurtenisdatum in de titel =
+aanmaakdatum van het ticket (op 20-10-2026 viel de escalatietag bij alle 17 tickets op
+die dag; een vervolgbericht dat later escaleert krijgt dus de datum van het ticket)."""
 from __future__ import annotations
 
 import argparse
@@ -52,6 +62,7 @@ ZAMMAD_BASE = os.environ.get("ZAMMAD_LOCAL_API", "http://127.0.0.1:18080/api/v1"
 ZAMMAD_PUBLIC = os.environ.get("ZAMMAD_PUBLIC_BASE_URL", "https://support.prudai.com")
 TOKEN_FILE = os.environ.get("ZAMMAD_AUTOREPLY_TOKEN_FILE", "/root/zammad/secrets/autoreply.token")
 ESCALATIE_TAG = "ai-escalate"
+PAGINA = 100
 TERUGKIJKEN = timedelta(days=14)
 TZ = ZoneInfo("Europe/Amsterdam")
 GESLOTEN_STATES = {"closed", "merged"}
@@ -95,17 +106,16 @@ def overslaan_reden(domein: str) -> str | None:
     return None
 
 
-def bedrijf_domeinen(company: dict[str, Any]) -> set[str]:
-    dn = company.get("domainName") or {}
-    urls = [dn.get("primaryLinkUrl")]
-    urls += [x.get("url") for x in (dn.get("secondaryLinks") or []) if isinstance(x, dict)]
-    return {h for h in (host(u) for u in urls) if h}
+def primair_domein(company: dict[str, Any]) -> str:
+    """Alleen het primaire domein: daar zoekt `cato companies list --domain` op, dus
+    een bedrijf dat alleen via een secundair domein bekend is, vinden we niet."""
+    return host((company.get("domainName") or {}).get("primaryLinkUrl"))
 
 
 def exact_bedrijf(kandidaten: list[dict[str, Any]], domein: str) -> tuple[dict | None, str | None]:
     """`cato companies list --domain` zoekt op substring ('ab.nl' vindt ook 'grab.nl');
     hier telt alleen een exacte host. Eén treffer = bekend; anders een reden."""
-    exact = [c for c in kandidaten if domein in bedrijf_domeinen(c)]
+    exact = [c for c in kandidaten if primair_domein(c) == domein]
     if len(exact) == 1:
         return exact[0], None
     return None, ("geen_bedrijf" if not exact else "meerdere_bedrijven")
@@ -120,8 +130,7 @@ def notitie(ticket: dict[str, Any], tags: list[str]) -> tuple[str, str]:
     /cato-agenda en /cato-groom als gebeurtenisdatum lezen."""
     nummer, datum = ticket["number"], nl_datum(ticket["created_at"])
     categorie = next((t[len("topic-"):] for t in sorted(tags) if t.startswith("topic-")), None)
-    signalen = sorted(t[len("escalation-"):] for t in tags
-                      if t.startswith("escalation-") and t != "escalation-email")
+    signalen = sorted(t[len("escalation-"):] for t in tags if t.startswith("escalation-"))
     titel = f"Klantmelding {datum} — Zammad #{nummer} geëscaleerd"
     body = "\n".join([
         f"Zammad-ticket [#{nummer}]({ZAMMAD_PUBLIC}/#ticket/zoom/{ticket['id']}) is door de "
@@ -138,9 +147,23 @@ def notitie(ticket: dict[str, Any], tags: list[str]) -> tuple[str, str]:
     return titel, body
 
 
-def ticketnummer_uit(titel: str) -> str | None:
-    m = re.search(r"Zammad #(\d+)", titel or "")
-    return m.group(1) if m else None
+def _ts(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def in_venster(t: dict[str, Any], sinds: datetime) -> bool:
+    """Aangemaakt sinds `sinds`, óf ouder maar nog open en sindsdien bijgewerkt (een
+    vervolgbericht dat later escaleert). Een oud ticket dat alleen gesloten werd,
+    valt erbuiten — anders maakt de eerste run een stapel oude meldingen aan."""
+    if _ts(t["created_at"]) >= sinds:
+        return True
+    return _ts(t["updated_at"]) >= sinds and str(t.get("state") or "") not in GESLOTEN_STATES
+
+
+def ticket_id_uit(body: str) -> int | None:
+    """Het Zammad-ticket-id uit de link die notitie() in de body zet."""
+    m = re.search(r"#ticket/zoom/(\d+)\)", body or "")
+    return int(m.group(1)) if m else None
 
 
 def noemt_ticket(titel: str, nummer: Any) -> bool:
@@ -161,23 +184,34 @@ class Zammad:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
 
+    def post(self, path: str, body: dict[str, Any]) -> Any:
+        req = urllib.request.Request(f"{self.base}{path}", data=json.dumps(body).encode(),
+                                     method="POST",
+                                     headers={"Authorization": f"Token token={self.token}",
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+
     def escalaties(self, sinds: datetime) -> list[dict[str, Any]]:
+        """Alle tickets met de escalatietag, via de SQL-conditie (geen `query` → Zammad
+        slaat Elasticsearch over). Een antwoord dat geen lijst is, is een fout — nooit
+        stil "geen escalaties"."""
         uit, pagina = [], 1
         while True:
-            rij = self.get("/tickets/search", query=f"tags:{ESCALATIE_TAG}", limit=100,
-                           page=pagina, expand="true", sort_by="created_at", order_by="desc")
-            rij = rij if isinstance(rij, list) else []
+            rij = self.post("/tickets/search", {
+                "condition": {"ticket.tags": {"operator": "contains all",
+                                              "value": ESCALATIE_TAG}},
+                "limit": PAGINA, "page": pagina, "expand": True})
+            if not isinstance(rij, list):
+                raise RuntimeError("zoekantwoord is geen lijst")
             uit += rij
-            if len(rij) < 100:
+            if len(rij) < PAGINA:
                 break
             pagina += 1
-        return [t for t in uit
-                if datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")) >= sinds]
+        return [t for t in uit if in_venster(t, sinds)]
 
-    def ticket_op_nummer(self, nummer: str) -> dict[str, Any] | None:
-        rij = self.get("/tickets/search", query=f"number:{nummer}", limit=5, expand="true")
-        return next((t for t in (rij if isinstance(rij, list) else [])
-                     if str(t.get("number")) == str(nummer)), None)
+    def ticket(self, ticket_id: int) -> dict[str, Any]:
+        return self.get(f"/tickets/{ticket_id}", expand="true")
 
     def email(self, user_id: int) -> str:
         return str(self.get(f"/users/{user_id}").get("email") or "")
@@ -199,46 +233,67 @@ def ronde(z: Zammad, run_cato: Callable[..., Any], sinds: datetime, schrijven: b
     telling: Counter = Counter()
     for t in z.escalaties(sinds):
         telling["escalaties"] += 1
-        domein = mail_domein(z.email(t["customer_id"]))
-        reden = overslaan_reden(domein)
-        bedrijf = None
-        if reden is None:
-            kand = run_cato("companies", "list", "--domain", domein, "--json",
-                            "--fields", "id,domainName", "--limit", "50") or []
-            bedrijf, reden = exact_bedrijf(kand, domein)
-        if reden:
-            telling[f"overgeslagen_{reden}"] += 1
-            continue
-        # Elke notitie die dit ticket al noemt telt, ook een handmatige aan een persoon
-        # (de terugvulling van 24-09 schreef "(#59034)" in de titel).
-        bestaand = run_cato("notes", "list", "--title", f"#{t['number']}", "--all", "--json",
-                            "--fields", "id,title") or []
-        if any(noemt_ticket(n.get("title"), t["number"]) for n in bestaand):
-            telling["al_genoteerd"] += 1
-            continue
-        titel, body = notitie(t, z.tags(t["id"]))
-        if not schrijven:
-            telling["zou_aanmaken"] += 1
-            continue
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
-            fh.write(body)
         try:
-            run_cato("notes", "create", "--soort", "KLANTMELDING", "--afhandeling", "OPEN",
-                     "--title", titel, "--body-file", fh.name, "--company-id", bedrijf["id"],
-                     "--no-dry-run", "--yes", "--json")
-        finally:
-            os.unlink(fh.name)
-        telling["aangemaakt"] += 1
+            verwerk_ticket(z, run_cato, t, schrijven, telling)
+        except Exception as e:          # één ticket stopt de rest niet
+            telling[f"fout_{type(e).__name__}"] += 1
+    telling.update(sync_opgelost(z, run_cato, schrijven))
+    return telling
 
-    # Terugkoppeling: eigen OPEN notities → OPGELOST als het ticket dicht is.
+
+def verwerk_ticket(z: Zammad, run_cato: Callable[..., Any], t: dict[str, Any],
+                   schrijven: bool, telling: Counter) -> None:
+    domein = mail_domein(z.email(t["customer_id"]))
+    reden = overslaan_reden(domein)
+    bedrijf = None
+    if reden is None:
+        kand = run_cato("companies", "list", "--domain", domein, "--all", "--json") or []
+        bedrijf, reden = exact_bedrijf(kand, domein)
+    if reden:
+        telling[f"overgeslagen_{reden}"] += 1
+        return
+    # Elke notitie die dit ticket al noemt telt, ook een handmatige aan een persoon
+    # (de terugvulling van 24-09 schreef "(#59034)" in de titel).
+    bestaand = run_cato("notes", "list", "--title", f"#{t['number']}", "--all", "--json",
+                        "--fields", "id,title") or []
+    if any(noemt_ticket(n.get("title"), t["number"]) for n in bestaand):
+        telling["al_genoteerd"] += 1
+        return
+    titel, body = notitie(t, z.tags(t["id"]))
+    if not schrijven:
+        telling["zou_aanmaken"] += 1
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+        fh.write(body)
+    # Al dicht in Zammad (bv. bij terugvullen met --since): meteen OPGELOST vastleggen.
+    afhandeling = "OPGELOST" if str(t.get("state") or "") in GESLOTEN_STATES else "OPEN"
+    try:
+        run_cato("notes", "create", "--soort", "KLANTMELDING", "--afhandeling", afhandeling,
+                 "--title", titel, "--body-file", fh.name, "--company-id", bedrijf["id"],
+                 "--no-dry-run", "--yes", "--json")
+    finally:
+        os.unlink(fh.name)
+    telling["aangemaakt" if afhandeling == "OPEN" else "aangemaakt_opgelost"] += 1
+
+
+def sync_opgelost(z: Zammad, run_cato: Callable[..., Any], schrijven: bool) -> Counter:
+    """Eigen OPEN notities → OPGELOST als het ticket in Zammad dicht is."""
+    telling: Counter = Counter()
     eigen = run_cato("notes", "list", "--title", "Zammad #", "--soort", "KLANTMELDING", "--open",
                      "--all", "--json", "--fields", "id,title,bodyV2") or []
     for n in eigen:
-        if HANDTEKENING not in ((n.get("bodyV2") or {}).get("markdown") or ""):
+        body = (n.get("bodyV2") or {}).get("markdown") or ""
+        if HANDTEKENING not in body:
             continue                     # handwerk van een mens: niet aankomen
-        nummer = ticketnummer_uit(n.get("title") or "")
-        ticket = z.ticket_op_nummer(nummer) if nummer else None
-        if not ticket or str(ticket.get("state") or "") not in GESLOTEN_STATES:
+        tid = ticket_id_uit(body)
+        try:
+            if tid is None:
+                raise LookupError("geen ticketlink")
+            ticket = z.ticket(tid)
+        except Exception as e:           # telt mee in de exitcode, stopt de rest niet
+            telling[f"fout_sync_{type(e).__name__}"] += 1
+            continue
+        if str(ticket.get("state") or "") not in GESLOTEN_STATES:
             continue
         if not schrijven:
             telling["zou_oplossen"] += 1
@@ -259,7 +314,8 @@ def main(argv: list[str]) -> int:
     if a.no_dry_run != a.yes:
         print("--no-dry-run en --yes horen samen", file=sys.stderr)
         return 2
-    sinds = (datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc) if a.since
+    sinds = (datetime.combine(datetime.strptime(a.since, "%Y-%m-%d").date(),
+                              datetime.min.time(), TZ) if a.since
              else datetime.now(timezone.utc) - TERUGKIJKEN)
     try:
         token = open(TOKEN_FILE).read().strip()
@@ -267,9 +323,10 @@ def main(argv: list[str]) -> int:
     except Exception as e:               # alleen de foutklasse: geen URL's of inhoud
         print(f"zammad-cato-meldingen: FOUT {type(e).__name__}", file=sys.stderr)
         return 1
+    telling.setdefault("escalaties", 0)  # "0" zegt iets; een lege regel niet
     print(("" if schrijven else "[droogloop] ") + "zammad-cato-meldingen sinds "
           f"{sinds:%Y-%m-%d}: " + ", ".join(f"{k} {v}" for k, v in sorted(telling.items())))
-    return 0
+    return 1 if any(k.startswith("fout") for k in telling) else 0
 
 
 if __name__ == "__main__":

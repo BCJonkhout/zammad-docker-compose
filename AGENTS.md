@@ -111,18 +111,26 @@ time here:
 
 - `bin/zammad-cato-meldingen.py` (systemd `zammad-cato-meldingen.timer`, elk kwartier) zet
   elk ticket met tag `ai-escalate` van een **bekende klantorganisatie** als notitie
-  KLANTMELDING (afhandeling OPEN) in CATO, via de cato-CLI. Bekend = het e-maildomein van de
-  klant hoort bij precies één CATO-bedrijf (exacte host). Gratis mail, Prudai zelf, geen of
-  meerdere treffers worden geteld en overgeslagen, niet geraden.
+  KLANTMELDING (afhandeling OPEN; al gesloten ticket → meteen OPGELOST) in CATO, via de
+  cato-CLI. Bekend = het e-maildomein van de klant is het **primaire** domein van precies één
+  CATO-bedrijf (exacte host). Gratis mail, Prudai zelf, geen of meerdere treffers worden
+  geteld en overgeslagen, niet geraden.
+- Zoeken in Zammad gaat via een SQL-conditie (`POST /tickets/search` met `condition`, zonder
+  `query`), niet via Elasticsearch: dat geeft bij een ES-fout een lege lijst met HTTP 200, en
+  de index miste op 20-10-2026 één van de 17 escalaties. Venster: aangemaakt sinds `--since`
+  (14 dagen), plus oudere tickets die nog open staan en sindsdien zijn bijgewerkt.
 - Eén notitie per ticket: noemt al een notitie `#<nummer>` in de titel (ook handwerk), dan
   gebeurt er niets. Sluit het ticket in Zammad, dan zet het script zijn eigen notitie op
-  OPGELOST; notities zonder de handtekening "Automatisch vastgelegd door zammad-cato-meldingen."
+  OPGELOST (ticket gelezen op id uit de link in de notitie); notities zonder de handtekening "Automatisch vastgelegd door zammad-cato-meldingen."
   raakt het niet aan.
 - Alleen metadata in CATO (nummer + link, datum, categorie-/signaaltags) — nooit onderwerp of
   berichttekst. Leest Zammad met `secrets/autoreply.token`; schrijft niets in Zammad. Waarom
   niet in de autoreply-container: het enige schrijfpad naar CATO is de cato-CLI op de host.
+- Een fout bij één ticket stopt de rest niet, maar de run eindigt met exit 1 (zichtbaar als
+  mislukte unit in `systemctl --failed`); `flock` voorkomt twee runs tegelijk.
 - Droogloop: `/usr/bin/python3 bin/zammad-cato-meldingen.py [--since YYYY-MM-DD]`;
-  tests: `/usr/bin/python3 bin/test_zammad_cato_meldingen.py`.
+  tests: `/usr/bin/python3 bin/test_zammad_cato_meldingen.py` (netwerkvrij).
+  `ZCM_PATH=<kopie>` richt de suite op een gemuteerde kopie: zo draai je de breekproef.
 
 ## Notification Rules
 
