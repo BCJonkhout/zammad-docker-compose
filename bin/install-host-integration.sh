@@ -14,8 +14,11 @@ ln -sfn "${NGINX_TARGET}" /etc/nginx/sites-enabled/support.prudai.com
 
 install -m 644 "${ROOT_DIR}/systemd/zammad-docs-sync.service" /etc/systemd/system/zammad-docs-sync.service
 install -m 644 "${ROOT_DIR}/systemd/zammad-docs-sync.timer" /etc/systemd/system/zammad-docs-sync.timer
+install -m 644 "${ROOT_DIR}/systemd/zammad-cato-meldingen.service" /etc/systemd/system/zammad-cato-meldingen.service
+install -m 644 "${ROOT_DIR}/systemd/zammad-cato-meldingen.timer" /etc/systemd/system/zammad-cato-meldingen.timer
 
 nginx -t
 systemctl reload nginx
 systemctl daemon-reload
 systemctl enable --now zammad-docs-sync.timer
+systemctl enable --now zammad-cato-meldingen.timer

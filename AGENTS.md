@@ -107,6 +107,23 @@ time here:
   - posts an internal handoff note if the AI cannot safely answer from docs
 - Follow-up customer messages should continue the AI conversation until escalation is needed.
 
+### Escalatie → KLANTMELDING in CATO
+
+- `bin/zammad-cato-meldingen.py` (systemd `zammad-cato-meldingen.timer`, elk kwartier) zet
+  elk ticket met tag `ai-escalate` van een **bekende klantorganisatie** als notitie
+  KLANTMELDING (afhandeling OPEN) in CATO, via de cato-CLI. Bekend = het e-maildomein van de
+  klant hoort bij precies één CATO-bedrijf (exacte host). Gratis mail, Prudai zelf, geen of
+  meerdere treffers worden geteld en overgeslagen, niet geraden.
+- Eén notitie per ticket: noemt al een notitie `#<nummer>` in de titel (ook handwerk), dan
+  gebeurt er niets. Sluit het ticket in Zammad, dan zet het script zijn eigen notitie op
+  OPGELOST; notities zonder de handtekening "Automatisch vastgelegd door zammad-cato-meldingen."
+  raakt het niet aan.
+- Alleen metadata in CATO (nummer + link, datum, categorie-/signaaltags) — nooit onderwerp of
+  berichttekst. Leest Zammad met `secrets/autoreply.token`; schrijft niets in Zammad. Waarom
+  niet in de autoreply-container: het enige schrijfpad naar CATO is de cato-CLI op de host.
+- Droogloop: `/usr/bin/python3 bin/zammad-cato-meldingen.py [--since YYYY-MM-DD]`;
+  tests: `/usr/bin/python3 bin/test_zammad_cato_meldingen.py`.
+
 ## Notification Rules
 
 - Staff email notifications are intended for:

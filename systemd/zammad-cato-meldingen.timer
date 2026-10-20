@@ -1,0 +1,10 @@
+[Unit]
+Description=Elk kwartier: Zammad-escalaties naar CATO (KLANTMELDING)
+
+[Timer]
+OnCalendar=*:07/15
+Persistent=true
+Unit=zammad-cato-meldingen.service
+
+[Install]
+WantedBy=timers.target

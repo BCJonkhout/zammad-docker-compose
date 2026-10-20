@@ -1,0 +1,11 @@
+[Unit]
+Description=Zammad-escalaties als KLANTMELDING-notitie in CATO (via de cato-CLI)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/zammad
+ExecStart=/usr/bin/python3 /root/zammad/bin/zammad-cato-meldingen.py --no-dry-run --yes
+TimeoutStartSec=600
