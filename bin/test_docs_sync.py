@@ -522,7 +522,7 @@ class _StubSession:
         self._router = router
         self.requested = []
 
-    def get(self, url, timeout=None, allow_redirects=True):
+    def get(self, url, timeout=None, allow_redirects=True, headers=None):
         self.requested.append(url)
         return self._router(url)
 
@@ -1235,6 +1235,16 @@ class ProtectedCategoryTests(unittest.TestCase):
         self.assertIn("3 van 5", str(caught.exception))
         self.assertNotIn("Research (alleen LEO)", str(caught.exception))
         self.assertEqual(client.deletes(), [], "de guard breekt af vóór elke DELETE")
+
+
+class IndexFetchTests(unittest.TestCase):
+    """Sinds 24-10-2026 geeft docs.prudai.com Markdown bij een Accept-header die daar de
+    voorkeur aan geeft; de sessie van de sync doet dat voor losse pagina's. De index moet
+    HTML blijven, anders ontbreekt de Starlight-sidebar en faalt de hele sync."""
+
+    def test_index_wordt_als_html_opgehaald(self):
+        bron = open(MODULE_PATH, encoding="utf-8").read()
+        self.assertRegex(bron, r'session\.get\(index_url, timeout=30, headers=\{"Accept": "text/html"\}\)')
 
 
 if __name__ == "__main__":

@@ -1387,7 +1387,10 @@ def fetch_docs_tree(
     index_path = "/en/" if language == "en" else "/"
     index_url = f"{base_url.rstrip('/')}{index_path}"
     try:
-        index_response = session.get(index_url, timeout=30)
+        # De index moet HTML zijn: de paginaboom komt uit de Starlight-sidebar. Sinds 24-10-2026
+        # geeft docs.prudai.com Markdown terug als de Accept-header daar de voorkeur aan geeft
+        # (de sessie hieronder doet dat voor de losse pagina's), en dan ontbreekt de sidebar.
+        index_response = session.get(index_url, timeout=30, headers={"Accept": "text/html"})
     except requests.RequestException as exc:
         raise DocsIndexError(
             f"De documentatiesite is niet bereikbaar op {index_url} ({exc.__class__.__name__}: {exc}). "
