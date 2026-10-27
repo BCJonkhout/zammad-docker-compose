@@ -129,6 +129,7 @@ raw_output="$(
     -e ZAMMAD_FQDN="${ZAMMAD_FQDN}" \
     -e ZAMMAD_SHARED_ORGANIZATION_IDS="${ZAMMAD_SHARED_ORGANIZATION_IDS:-}" \
     -e AUTOREPLY_TOKEN_ROTATE="${AUTOREPLY_TOKEN_ROTATE:-}" \
+    -e ZAMMAD_AI_ON_EMAIL="${ZAMMAD_AI_ON_EMAIL:-0}" \
     zammad-railsserver \
     bash -lc 'cat > /tmp/prudai-provision.rb && bundle exec rails runner /tmp/prudai-provision.rb' <<'RUBY'
 require 'json'
@@ -542,9 +543,16 @@ autoreply_webhook.bearer_token = autoreply_webhook_bearer_token
 autoreply_webhook.note = 'Prudai BM25-grounded automation for new tickets and customer follow-ups.'
 autoreply_webhook.save!
 
+# E-mail channel phase 1 (docs/email-channel-support.md): the AI does not answer
+# e-mail articles until ZAMMAD_AI_ON_EMAIL=1. Same rule, same variable as in
+# bin/provision-email-channel.sh, which also writes this condition key.
+ai_on_email = ENV.fetch('ZAMMAD_AI_ON_EMAIL', '0') == '1'
+ai_article_type_ids = ai_on_email ? [1, 5, 11] : [5, 11]
+
 autoreply_trigger = ensure_ticket_trigger(
   name: 'prudai ai first response on new tickets',
   action: 'create',
+  article_type_ids: ai_article_type_ids,
   perform: {
     'notification.webhook' => {
       'webhook_id' => autoreply_webhook.id
@@ -555,6 +563,7 @@ autoreply_trigger = ensure_ticket_trigger(
 autoreply_trigger_followup = ensure_ticket_trigger(
   name: 'prudai ai follow-up on customer messages',
   action: 'update',
+  article_type_ids: ai_article_type_ids,
   perform: {
     'notification.webhook' => {
       'webhook_id' => autoreply_webhook.id
@@ -580,7 +589,8 @@ puts "__RESULT__#{JSON.generate(
   organizations_unshared: organizations_unshared,
   autoreply_token_permissions: AUTOREPLY_TOKEN_PERMISSIONS,
   autoreply_token_rotated: autoreply_token_rotate,
-  autoreply_roles: autoreply_user.roles.map(&:name)
+  autoreply_roles: autoreply_user.roles.map(&:name),
+  ai_article_type_ids: ai_article_type_ids
 )}"
 RUBY
 )"
@@ -651,5 +661,7 @@ PY
 
 if docker compose config --services | grep -qx 'zammad-autoreply'; then
   echo "Recreating zammad-autoreply with fresh config..."
-  docker compose up -d --build --force-recreate zammad-autoreply
+  # --no-deps: without it compose also recreates zammad-railsserver and zammad-nginx
+  # (dependencies of the autoreply), which takes support.prudai.com down (AGENTS.md).
+  docker compose up -d --build --force-recreate --no-deps zammad-autoreply
 fi
