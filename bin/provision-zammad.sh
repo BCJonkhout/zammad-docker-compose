@@ -100,10 +100,14 @@ sendgrid_api_key="$(discover_sendgrid_api_key || true)"
 docs_sync_service_email="${DOCS_SYNC_SERVICE_EMAIL:-docs-sync@support.prudai.com}"
 autoreply_service_email="${AUTOREPLY_SERVICE_EMAIL:-ai-agent@support.prudai.com}"
 autoreply_webhook_token_path="${ROOT_DIR}/secrets/autoreply-webhook.token"
+prudai_chat_webhook_token_path="${ROOT_DIR}/secrets/prudai-chat-webhook.token"
+prudai_chat_webhook_url="${PRUDAI_CHAT_WEBHOOK_URL:-https://api.prudai.com/support/zammad/webhook}"
 sendgrid_api_key_path="${ROOT_DIR}/secrets/sendgrid-api.key"
 
 ensure_secret_file "${autoreply_webhook_token_path}"
 autoreply_webhook_bearer_token="$(<"${autoreply_webhook_token_path}")"
+ensure_secret_file "${prudai_chat_webhook_token_path}"
+prudai_chat_webhook_bearer_token="$(<"${prudai_chat_webhook_token_path}")"
 
 if [[ -n "${sendgrid_api_key}" ]]; then
   write_secret_file "${sendgrid_api_key_path}" "${sendgrid_api_key}"
@@ -123,6 +127,9 @@ raw_output="$(
     -e KC_REALM="${KC_REALM}" \
     -e AUTOREPLY_SERVICE_EMAIL="${autoreply_service_email}" \
     -e AUTOREPLY_WEBHOOK_BEARER_TOKEN="${autoreply_webhook_bearer_token}" \
+    -e PRUDAI_CHAT_WEBHOOK_URL="${prudai_chat_webhook_url}" \
+    -e PRUDAI_CHAT_WEBHOOK_BEARER_TOKEN="${prudai_chat_webhook_bearer_token}" \
+    -e PRUDAI_PLATFORM_TOKEN_ROTATE="${PRUDAI_PLATFORM_TOKEN_ROTATE:-}" \
     -e DOCS_SYNC_SERVICE_EMAIL="${docs_sync_service_email}" \
     -e SENDGRID_API_KEY="${sendgrid_api_key}" \
     -e ZAMMAD_BOOTSTRAP_ADMIN_EMAIL="${ZAMMAD_BOOTSTRAP_ADMIN_EMAIL}" \
@@ -133,6 +140,14 @@ raw_output="$(
     bash -lc 'cat > /tmp/prudai-provision.rb && bundle exec rails runner /tmp/prudai-provision.rb' <<'RUBY'
 require 'json'
 require 'securerandom'
+require 'uri'
+
+# The matrix cannot filter on tags. Do not enable chat tickets unless the
+# persistent image extension is installed in this Rails process.
+raise 'Build and roll out the Prudai-chat Zammad image first.' unless defined?(PrudaiChat) && Transaction::Notification < PrudaiChat::AgentEmail && Ticket::PerformChanges::Action::NotificationEmail < PrudaiChat::AutomaticEmail
+chat_endpoint = ENV.fetch('PRUDAI_CHAT_WEBHOOK_URL')
+chat_uri = URI.parse(chat_endpoint)
+raise 'PRUDAI_CHAT_WEBHOOK_URL must be HTTPS without credentials.' unless chat_uri.is_a?(URI::HTTPS) && chat_uri.host && !chat_uri.userinfo
 
 UserInfo.current_user_id = 1
 
@@ -286,6 +301,12 @@ bootstrap_admin_email = ENV.fetch('ZAMMAD_BOOTSTRAP_ADMIN_EMAIL')
 sendgrid_api_key = ENV.fetch('SENDGRID_API_KEY', '').strip
 
 users_group = Group.find_by!(name: 'Users')
+support_group = Group.find_or_initialize_by(name: 'Support')
+support_group.active = true
+support_group.created_by_id ||= 1
+support_group.updated_by_id = 1
+support_group.save!
+Tag::Item.find_or_create_by!(name: PrudaiChat::TAG)
 
 nl_locale = find_locale('nl-nl', 'nl')
 en_locale = find_locale('en-us', 'en')
@@ -450,6 +471,32 @@ autoreply_token = ensure_persistent_api_token(
   rotate:      autoreply_token_rotate
 )
 
+# Zammad's ticket.agent is the minimum API permission for ticket/article/tag
+# access. Group rights restrict it to Support, without full/delete/overview.
+platform_user = User.find_or_initialize_by(login: 'prudai-platform')
+platform_user.email = 'prudai-platform@support.prudai.com'
+platform_user.firstname = 'Prudai'
+platform_user.lastname = 'Platform'
+platform_user.active = true
+platform_user.created_by_id ||= 1
+platform_user.updated_by_id = 1
+platform_user.password = SecureRandom.urlsafe_base64(32) if platform_user.new_record?
+platform_user.roles = [agent_role]
+platform_user.group_names_access_map = { support_group.name => %w[read create change] }
+apply_user_preferences(platform_user, locale: nl_locale.locale, theme: 'light', notification_matrix: service_notification_matrix)
+platform_user.save!
+raise 'prudai-platform must not hold admin permissions.' if platform_user.permissions?('admin')
+unless platform_user.group_ids_access(%w[read create change overview]).sort == [support_group.id] &&
+       !platform_user.group_access?(support_group, %w[full overview])
+  raise 'prudai-platform inherits excessive group rights; narrow the Agent role before provisioning.'
+end
+platform_token = ensure_persistent_api_token(
+  user: platform_user,
+  name: 'prudai-platform',
+  permissions: ['ticket.agent'],
+  rotate: ENV.fetch('PRUDAI_PLATFORM_TOKEN_ROTATE', '') == '1'
+)
+
 staff_emails = [bootstrap_admin_email, 'haisma@prudai.com'].map(&:downcase).uniq
 staff_configured = []
 
@@ -458,7 +505,7 @@ staff_emails.each do |email|
   next if user.nil?
 
   user.roles = [admin_role, agent_role]
-  user.group_names_access_map = { users_group.name => 'full' }
+  user.group_names_access_map = { users_group.name => 'full', support_group.name => 'full' }
   apply_user_preferences(
     user,
     locale: nl_locale.locale,
@@ -562,11 +609,56 @@ autoreply_trigger_followup = ensure_ticket_trigger(
   }
 )
 
+# Keep all existing mail-trigger predicates (including expert OR selectors),
+# but exclude chat tickets. Also cover any trigger using the autoreply webhook.
+chat_excluded_trigger_ids = []
+Trigger.all.each do |trigger|
+  perform = (trigger.perform || {}).deep_stringify_keys
+  next unless perform.key?('notification.email') || perform.dig('notification.webhook', 'webhook_id').to_s == autoreply_webhook.id.to_s
+
+  trigger.condition = PrudaiChat.exclude((trigger.condition || {}).deep_stringify_keys)
+  trigger.updated_by_id = 1
+  trigger.save!
+  chat_excluded_trigger_ids << trigger.id
+end
+
+chat_webhook = Webhook.find_or_initialize_by(name: 'Prudai-chat: antwoord naar de app')
+chat_webhook.active = true
+chat_webhook.endpoint = chat_endpoint
+chat_webhook.http_method = 'post'
+chat_webhook.ssl_verify = true
+chat_webhook.customized_payload = false
+chat_webhook.custom_payload = nil
+chat_webhook.bearer_token = ENV.fetch('PRUDAI_CHAT_WEBHOOK_BEARER_TOKEN')
+chat_webhook.note = 'Public staff replies to Prudai Support chat; platform-backend owns customer mail.'
+chat_webhook.save!
+
+chat_trigger = Trigger.find_or_initialize_by(name: 'Prudai-chat: antwoord naar de app')
+chat_trigger.active = true
+chat_trigger.activator = 'action'
+chat_trigger.execution_condition_mode = 'always'
+chat_trigger.created_by_id ||= 1
+chat_trigger.updated_by_id = 1
+chat_trigger.condition = PrudaiChat.reply_condition(
+  agent_sender_id: Ticket::Article::Sender.find_by!(name: 'Agent').id,
+  system_sender_id: Ticket::Article::Sender.find_by!(name: 'System').id,
+  email_type_id: Ticket::Article::Type.find_by!(name: 'email').id,
+  excluded_user_ids: [1, platform_user.id, autoreply_user.id, docs_sync_user.id]
+)
+chat_trigger.perform = { 'notification.webhook' => { 'webhook_id' => chat_webhook.id } }
+chat_trigger.save!
+
 puts "__RESULT__#{JSON.generate(
   kb_nl_id: kb_nl.id,
   kb_en_id: kb_en.id,
   docs_sync_token: docs_sync_token.token,
   autoreply_token: autoreply_token.token,
+  platform_token: platform_token.token,
+  platform_token_permissions: ['ticket.agent'],
+  platform_group_access: platform_user.group_names_access_map,
+  chat_trigger_id: chat_trigger.id,
+  chat_webhook_id: chat_webhook.id,
+  chat_excluded_trigger_ids: chat_excluded_trigger_ids,
   docs_sync_email: docs_sync_user.email,
   autoreply_email: autoreply_user.email,
   smtp_configured: smtp_configured,
@@ -587,20 +679,20 @@ RUBY
 
 result_json="$(printf '%s\n' "${raw_output}" | sed -n 's/^__RESULT__//p' | tail -n 1)"
 if [[ -z "${result_json}" ]]; then
-  printf '%s\n' "${raw_output}" >&2
   echo "Failed to extract provisioning result payload." >&2
   exit 1
 fi
 
-RESULT_JSON="${result_json}" python3 - <<'PY'
+ROOT_DIR="${ROOT_DIR}" RESULT_JSON="${result_json}" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
 
 result = json.loads(os.environ["RESULT_JSON"])
-root = Path("/root/zammad")
+root = Path(os.environ["ROOT_DIR"])
 token_path = root / "secrets" / "docs-sync.token"
 autoreply_token_path = root / "secrets" / "autoreply.token"
+platform_token_path = root / "secrets" / "prudai-platform.token"
 env_path = root / "docs-sync.env"
 
 token_path.write_text(result["docs_sync_token"] + "\n", encoding="utf-8")
@@ -608,6 +700,9 @@ os.chmod(token_path, 0o600)
 
 autoreply_token_path.write_text(result["autoreply_token"] + "\n", encoding="utf-8")
 os.chmod(autoreply_token_path, 0o600)
+
+platform_token_path.write_text(result["platform_token"] + "\n", encoding="utf-8")
+os.chmod(platform_token_path, 0o600)
 
 env_path.write_text(
     "\n".join(
@@ -646,10 +741,11 @@ os.chmod(env_path, 0o600)
 sanitized = dict(result)
 sanitized.pop("docs_sync_token", None)
 sanitized.pop("autoreply_token", None)
+sanitized.pop("platform_token", None)
 print(json.dumps(sanitized))
 PY
 
-if docker compose config --services | grep -qx 'zammad-autoreply'; then
+if [[ "${PRUDAI_PROVISION_RESTART_AUTOREPLY:-1}" == '1' ]] && docker compose config --services | grep -qx 'zammad-autoreply'; then
   echo "Recreating zammad-autoreply with fresh config..."
-  docker compose up -d --build --force-recreate zammad-autoreply
+  docker compose up -d --build --force-recreate --no-deps zammad-autoreply
 fi

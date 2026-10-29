@@ -881,6 +881,12 @@ class AutoreplyService:
         ticket = payload.get("ticket") or {}
         article = payload.get("article") or {}
         ticket_id = int(ticket["id"])
+        # Chat replies belong to platform-backend, including retries of older
+        # autoreply webhooks. Read current tags from Zammad rather than trusting
+        # the webhook snapshot, before article reads, AI calls or any writes.
+        if "prudai-chat" in self.zammad.get_ticket_tags(ticket_id):
+            return {"status": "skipped", "reason": "prudai_chat", "ticket_id": ticket_id}
+
         article_id = int(article["id"])
         article_marker = self._article_marker(ticket_id=ticket_id, article_id=article_id)
         escalation_email_tag = self._escalation_email_tag(article_id)

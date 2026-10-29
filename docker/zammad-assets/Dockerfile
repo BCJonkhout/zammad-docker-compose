@@ -11,6 +11,7 @@ COPY --chown=zammad:zammad prudai-favicon.png /opt/zammad/public/apple-touch-ico
 COPY --chown=zammad:zammad prudai-favicon.png /opt/zammad/public/favicon.png
 COPY --chown=zammad:zammad application.html.erb /opt/zammad/app/views/layouts/application.html.erb
 COPY --chown=zammad:zammad knowledge_base.html.erb /opt/zammad/app/views/layouts/knowledge_base.html.erb
+COPY --chown=zammad:zammad prudai_chat.rb /opt/zammad/config/initializers/prudai_chat.rb
 COPY prudai-entrypoint.sh /usr/local/bin/prudai-entrypoint
 RUN chmod +x /usr/local/bin/prudai-entrypoint
 
