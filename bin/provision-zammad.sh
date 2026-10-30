@@ -497,7 +497,7 @@ platform_token = ensure_persistent_api_token(
   rotate: ENV.fetch('PRUDAI_PLATFORM_TOKEN_ROTATE', '') == '1'
 )
 
-staff_emails = [bootstrap_admin_email, 'haisma@prudai.com'].map(&:downcase).uniq
+staff_emails = [bootstrap_admin_email].map(&:downcase).uniq
 staff_configured = []
 
 staff_emails.each do |email|

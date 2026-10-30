@@ -73,7 +73,7 @@ een draaiboek voor een later geautoriseerd uitrolmoment.
    mkdir secrets/prudai-chat-rollback
    docker compose exec -T zammad-railsserver bundle exec rails runner \
      'require "json"; puts JSON.generate(triggers: Trigger.all.map { |t| {id: t.id, condition: t.condition, active: t.active} }, agents: User.joins(:roles).where(roles: {name: "Agent"}).distinct.map { |u| {id: u.id, groups: u.group_ids_access_map} })' \
-     > secrets/prudai-chat-rollback/config.json
+     | grep '^{' > secrets/prudai-chat-rollback/config.json
    docker image tag "$(docker compose images -q zammad-railsserver)" prudai/zammad-support:pre-prudai-chat
    docker image tag "$(docker compose images -q zammad-autoreply)" prudai/zammad-autoreply:pre-prudai-chat
    bash -n bin/provision-zammad.sh
