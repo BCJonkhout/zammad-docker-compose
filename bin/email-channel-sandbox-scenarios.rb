@@ -92,6 +92,16 @@ when 'aitriggers'
     check(results, "mail trigger '#{name}' excludes chat tickets", c['conditions'].to_a.include?(CHAT_EXCLUSION), c.keys.inspect)
   end
 
+when 'prep_f2'
+  # Audit B2 (round 2): the script reloads the group after saving the EmailAddress, because
+  # EmailAddress#update_email_address_id binds a lone group behind its back. Reach that state:
+  # Users unbound, support@ with a pending rename (update_all skips the callbacks). Then
+  # `apply` renames the address (the callback binds Users) and must leave Users unbound while
+  # the channel is off. Without `users_group.reload` this ends bound.
+  EmailAddress.where(email: ADDRESS).update_all(name: 'Pending rename')
+  Group.where(name: 'Users').update_all(email_address_id: nil)
+  check(results, 'prep_f2: pending rename + unbound Users', EmailAddress.find_by!(email: ADDRESS).name == 'Pending rename' && Group.find_by!(name: 'Users').email_address_id.nil?)
+
 when 'binding'
   # SANDBOX_EXPECT=unbound: Users has no e-mail address and its original signature;
   # bound: Users sends as support@ with "Prudai Support".

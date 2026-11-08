@@ -145,7 +145,7 @@ Triggermail gaat nooit naar een eigen systeemadres en respecteert `send_no_auto_
 | R11 | Elke staf-notificatie en elke klantmail via de trigger wordt als intern artikel in het ticket bewaard | bewust: zo is zichtbaar wat er verstuurd is. Kost wat ruimte in de tijdlijn |
 | R12 | Gespoofte mail met afzender support@ wordt genegeerd | gewenst. DMARC `p=quarantine` vangt het grootste deel al op |
 | R13 | De handtekening verliest de kleur van de links en de `<sup>`-stijl (Zammad-sanitizer) | cosmetisch; logo, keurmerken en voettekst blijven (als inline-PNG; externe afbeeldingen zou de sanitizer verwijderen) |
-| R14 | `provision-zammad.sh` herstartte bij de autoreply-recreate ook railsserver + nginx | in deze PR gerepareerd (`--no-deps`). Voor deze uitrol hoeft `provision-zammad.sh` niet te draaien |
+| R14 | `provision-zammad.sh` herstartte bij de autoreply-recreate ook railsserver + nginx | `--no-deps` stond al op main (08-10-2026); deze PR voegt alleen een commentaar toe. Voor deze uitrol hoeft `provision-zammad.sh` niet te draaien |
 | R16 | Herkoppelen in de UI laat `folder_id` vallen terwijl het kanaal aan blijft: Zammad leest dan de Inbox (R1 opnieuw) | vaste procedure in §3 (eerst `deactivate`); elke `plan`/`apply` zet een actief kanaal zonder map direct uit; vervolgstap: een monitor die alarmeert bij een actief kanaal zonder map |
 | R17 | Fase 1: een afwezigheidsmelding van de klant geeft ook een staf-notificatie. Fase 2: klantmail die als auto-reply gemarkeerd is (`Precedence: bulk`, `Auto-Submitted`) krijgt geen AI-antwoord én geen staf-notificatie | fase 1 is alleen ruis. Voor fase 2 beoordelen we bij de fase-2-beslissing hoeveel van zulke mails er binnenkwamen (aantal tickets met `is-auto-response`) |
 | R18 | De seed-triggers `auto reply (on new tickets / follow-up)` gaan weer aan en mailen dan elke klant | `provision-zammad.sh` zet ze uit (in productie uit, gemeten); `activate` weigert als er één aan staat (guard `seed_auto_replies_inactive`) |
@@ -159,7 +159,7 @@ Elke stap die iets live verandert, wacht op een expliciete go van Beau.
    - PR gemerged.
    - `inbox-verwerken` aangepast (R5).
    - Besluit: met welk account wordt gekoppeld (§3).
-   - Autoreply herbouwd met de nieuwe `app.py`:
+   - Autoreply herbouwd met de nieuwe `app.py` (**pas vlak vóór de activatie, niet eerder**: de nieuwe loop-headers `Auto-Submitted` en `X-Auto-Response-Suppress` zitten ook op de live escalatiemail naar support@, en het doorsturen naar Beau en Geert is met die headers nooit gemeten. Na de herbouw: lok één AI-escalatie uit en controleer dat de mail bij Beau en Geert aankomt; terugrol = het vorige autoreply-image):
      `docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --build --force-recreate --no-deps zammad-autoreply`.
      Dat is een productieherstart van alleen de autoreply: ~seconden geen AI-antwoorden, de webhook
      herhaalt. Daarna de post-deploy-check.
@@ -234,7 +234,11 @@ Ook getest:
   map terug en kan het kanaal weer aan.
 - `deactivate`, waarna `plan` 0 wijzigingen toont.
 
-Uitkomst 20-10-2026 (run `aae0c`, ná de auditfixes): **35/35 PASS**.
+Uitkomst 20-10-2026 (run `aae0c`, ná de auditfixes): **35/35 PASS**. Uitkomst 08-11-2026 (na de merge met main en
+de fix voor de geneste triggercondities, fixture in de productievorm, fasen `aitriggers` en `prep_f2`): alle checks PASS, 0 FAIL.
+De sandbox is de enige test van `provision-email-channel.sh` (ci.yaml draait hem niet): **draai hem vóór elke `apply` of `activate`**
+als het script of `provision-zammad.sh` sinds de laatste run is gewijzigd. De geneste triggercondities
+(`condition_nodes`, `with_article_types`, `chat_safe`) worden alleen door deze sandbox gedekt.
 
 Dekking eerlijk benoemd:
 
@@ -370,7 +374,7 @@ Variabelen (standaard tussen haakjes):
 - `ZAMMAD_EMAIL_DISPLAY_NAME` (Prudai Support)
 - `ZAMMAD_EMAIL_FOLDER` (Zammad)
 - `ZAMMAD_EMAIL_FOLDER_ID`: slaat de Graph-opzoeking over
-- `ZAMMAD_EMAIL_STAFF` (jonkhout@, haisma@)
+- `ZAMMAD_EMAIL_STAFF` (standaard jonkhout@, haisma@; haisma@ staat in Zammad op inactief sinds de offboarding, dus **zet de lijst bij de activatie expliciet** en lees `staff_recipients` in `plan`)
 - `ZAMMAD_EMAIL_SIGNATURE_FILE`
 - `ZAMMAD_AI_ON_EMAIL` (0)
 - `ZAMMAD_GRAPH_CLIENT_ID`, `ZAMMAD_GRAPH_CLIENT_SECRET`, `ZAMMAD_GRAPH_TENANT_ID`: optioneel.
