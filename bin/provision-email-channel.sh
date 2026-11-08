@@ -152,9 +152,58 @@ def resolve_folder_id(channel)
   matches.first['id']
 end
 
+# Trigger conditions have two shapes. Zammad 7 stores the flat form
+# ({'article.type_id' => {...}}); once bin/provision-zammad.sh has run with the chat
+# guard (PrudaiChat.exclude, docker/zammad-assets/prudai_chat.rb) they are nested
+# ({'operator' => 'AND', 'conditions' => [...]}) -- which is what production has.
+# Everything below must read and write both, or it adds a dead flat key to a nested
+# condition and the guard then fails (or, worse, the AI keeps answering e-mail).
+def condition_nodes(condition, name)
+  return [] unless condition.is_a?(Hash)
+
+  found = []
+  found << condition if condition['name'] == name
+  Array(condition['conditions']).each { |child| found.concat(condition_nodes(child, name)) }
+  found
+end
+
+def article_type_values(condition)
+  if condition.key?('conditions')
+    condition_nodes(condition, 'article.type_id').map { |node| Array(node['value']).map(&:to_i).sort }
+  elsif condition['article.type_id']
+    [Array(condition.dig('article.type_id', 'value')).map(&:to_i).sort]
+  else
+    []
+  end
+end
+
+def with_article_types(condition, ids)
+  condition = condition.deep_dup
+  unless condition.key?('conditions')
+    condition['article.type_id'] = { 'operator' => 'is', 'value' => ids.dup }
+    return condition
+  end
+
+  nodes = condition_nodes(condition, 'article.type_id')
+  if nodes.empty?
+    condition['conditions'] << { 'name' => 'article.type_id', 'operator' => 'is', 'value' => ids.dup }
+  else
+    nodes.each { |node| node['value'] = ids.dup }
+  end
+  condition
+end
+
+# Same exclusion provision-zammad.sh puts on every mail trigger: no mail for Prudai
+# chat tickets. The image also refuses the mail action itself for such tickets; this
+# keeps the condition equal to what provision-zammad.sh would write, so the two
+# scripts do not rewrite each other's triggers. Absent on an upstream image.
+def chat_safe(condition)
+  defined?(PrudaiChat) ? PrudaiChat.exclude(condition.deep_stringify_keys) : condition
+end
+
 def notification_trigger(name:, condition:, perform:, active:, note:)
   trigger = Trigger.find_or_initialize_by(name: name)
-  trigger.condition = condition
+  trigger.condition = chat_safe(condition)
   trigger.perform = perform
   trigger.active = active
   trigger.note = note
@@ -219,14 +268,15 @@ ActiveRecord::Base.transaction do
     trigger = Trigger.find_by(name: name)
     next if trigger.nil?
 
-    condition = trigger.condition.deep_dup
-    condition['article.type_id'] = { 'operator' => 'is', 'value' => AI_ARTICLE_TYPE_IDS.dup }
-    trigger.condition = condition
+    trigger.condition = with_article_types(trigger.condition, AI_ARTICLE_TYPE_IDS)
     track("trigger:#{name}", trigger)
   end
   ai_types_ok = AI_TRIGGER_NAMES.all? do |name|
     trigger = Trigger.find_by(name: name)
-    trigger.nil? || Array(trigger.condition.dig('article.type_id', 'value')).map(&:to_i).sort == AI_ARTICLE_TYPE_IDS.sort
+    next true if trigger.nil?
+
+    values = article_type_values(trigger.condition)
+    values.any? && values.all? { |ids| ids == AI_ARTICLE_TYPE_IDS.sort }
   end
   guard('ai_trigger_article_types', ai_types_ok, AI_ON_EMAIL ? 'phase 2: AI also answers e-mail' : 'phase 1: AI skips e-mail')
 

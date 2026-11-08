@@ -12,6 +12,8 @@ UserInfo.current_user_id = 1
 PHASE = ENV.fetch('SANDBOX_PHASE')
 ADDRESS = 'support@prudai.com'.freeze
 CUSTOMER = 'klant@example.org'.freeze
+AI_TRIGGER_NAMES = ['prudai ai first response on new tickets', 'prudai ai follow-up on customer messages'].freeze
+CHAT_EXCLUSION = { 'name' => 'ticket.tags', 'operator' => 'contains one not', 'value' => 'prudai-chat' }.freeze
 
 def check(results, name, ok, detail = nil)
   results << { 'check' => name, 'ok' => ok ? true : false, 'detail' => detail }.compact
@@ -58,16 +60,37 @@ when 'fixture'
   webhook.update!(endpoint: 'http://127.0.0.1:9/sandbox', ssl_verify: false, active: true)
   [['prudai ai first response on new tickets', 'create'], ['prudai ai follow-up on customer messages', 'update']].each do |name, action|
     trigger = Trigger.find_or_initialize_by(name: name)
+    flat = { 'ticket.action' => { 'operator' => 'is', 'value' => action }, 'ticket.state_id' => { 'operator' => 'is not', 'value' => 4 },
+             'article.type_id' => { 'operator' => 'is', 'value' => [1, 5, 11] }, 'article.sender_id' => { 'operator' => 'is', 'value' => 2 } }
+    # Production shape since the Prudai-chat guard: provision-zammad.sh wraps every
+    # mail/webhook trigger with PrudaiChat.exclude, which nests the condition.
     trigger.update!(
       active:    true,
-      condition: { 'ticket.action' => { 'operator' => 'is', 'value' => action }, 'ticket.state_id' => { 'operator' => 'is not', 'value' => 4 },
-                   'article.type_id' => { 'operator' => 'is', 'value' => [1, 5, 11] }, 'article.sender_id' => { 'operator' => 'is', 'value' => 2 } },
+      condition: PrudaiChat.exclude(flat),
       perform:   { 'notification.webhook' => { 'webhook_id' => webhook.id } }
     )
   end
+  check(results, 'fixture: AI triggers have the production (nested, chat-excluded) condition shape',
+        AI_TRIGGER_NAMES.all? { |name| c = Trigger.find_by!(name: name).condition; c.key?('conditions') && !c.key?('article.type_id') })
   # provision-zammad.sh switches Zammad's seeded auto replies off; so does production.
   Trigger.where(name: ['auto reply (on new tickets)', 'auto reply (on follow-up of tickets)']).find_each { |t| t.update!(active: false) }
   check(results, 'fixture: single group without e-mail address', Group.count == 1 && Group.first.email_address_id.nil?)
+
+when 'aitriggers'
+  # After apply: the AI triggers skip e-mail ([web, note] = 5, 11) INSIDE the nested
+  # condition (no stray flat key), keep their chat exclusion, and the two notification
+  # triggers this work adds carry the same exclusion.
+  expected = ENV.fetch('SANDBOX_EXPECT').split(',').map(&:to_i).sort
+  AI_TRIGGER_NAMES.each do |name|
+    c = Trigger.find_by!(name: name).condition
+    values = c['conditions'].flat_map { |node| [node, *Array(node['conditions'])] }.select { |n| n['name'] == 'article.type_id' }.map { |n| Array(n['value']).map(&:to_i).sort }
+    check(results, "ai trigger '#{name}': article types #{expected.inspect} inside the nested condition", values == [expected], values.inspect)
+    check(results, "ai trigger '#{name}': no stray flat key, chat exclusion kept", !c.key?('article.type_id') && c['conditions'].include?(CHAT_EXCLUSION), c.keys.inspect)
+  end
+  ['prudai notify customer on public agent reply', 'prudai notify staff on customer email follow-up'].each do |name|
+    c = Trigger.find_by!(name: name).condition
+    check(results, "mail trigger '#{name}' excludes chat tickets", c['conditions'].to_a.include?(CHAT_EXCLUSION), c.keys.inspect)
+  end
 
 when 'binding'
   # SANDBOX_EXPECT=unbound: Users has no e-mail address and its original signature;

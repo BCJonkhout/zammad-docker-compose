@@ -59,6 +59,7 @@ scenario link
 ZAMMAD_GRAPH_CLIENT_ID=sandbox-app ZAMMAD_GRAPH_CLIENT_SECRET=sandbox-secret ZAMMAD_GRAPH_TENANT_ID=sandbox-tenant \
   provision apply >/dev/null || fail "apply"
 [[ "$(provision apply | changes)" == 0 ]] && pass "apply is idempotent" || fail "apply not idempotent"
+scenario aitriggers 5,11
 scenario binding unbound
 if out="$(provision activate)"; then fail "activate without go marker succeeded"; fi
 grep -q "activate refused, failing guards: go_marker" <<<"${out}" && pass "activate without go marker refused (go_marker only)" \

@@ -53,6 +53,9 @@ class _FakeZammad:
     def get_ticket_articles(self, ticket_id):
         return [{"id": 9001, "sender": "Customer", "subject": SUBJECT, "body": "<p>Ik ben afwezig.</p>", "preferences": self.preferences}]
 
+    def get_ticket_tags(self, ticket_id):  # read: process_ticket checks the Prudai-chat tag first
+        return []
+
     def __getattr__(self, name):  # any write is a failure for the skip path
         def record(*args, **kwargs):
             self.writes.append(name)
