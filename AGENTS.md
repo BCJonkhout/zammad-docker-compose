@@ -155,6 +155,12 @@ time here:
   - escalation notification triggers
   - agent notification defaults
 - After changing Zammad setup logic, this script usually needs to be re-run.
+- The support@ e-mail channel (Microsoft 365 Graph) has its own entrypoint,
+  `bin/provision-email-channel.sh plan|apply|activate|deactivate`; it restarts nothing.
+  Design, risks, rollout, rollback and the browser-agent prompts:
+  `docs/email-channel-support.md`. Never pick the Inbox as fetch folder and never
+  leave "Keep messages on server" on its UI default ("no" deletes the mail in M365).
+  `ZAMMAD_AI_ON_EMAIL` (default 0) keeps the AI off e-mail articles in both scripts.
 
 ## Important Files
 
