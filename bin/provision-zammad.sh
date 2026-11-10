@@ -636,8 +636,10 @@ chat_webhook.active = true
 chat_webhook.endpoint = chat_endpoint
 chat_webhook.http_method = 'post'
 chat_webhook.ssl_verify = true
-chat_webhook.customized_payload = false
-chat_webhook.custom_payload = nil
+# platform-backend (/support/zammad/webhook) accepteert alleen {ticket_id, article_id} (strict zod-schema)
+# en haalt artikel en ticket zelf op; Zammad's standaardpayload {ticket, article} gaf 400 (gemeten 10-11-2026).
+chat_webhook.customized_payload = true
+chat_webhook.custom_payload = %({\n  "ticket_id": "\#{ticket.id}",\n  "article_id": "\#{article.id}"\n})
 chat_webhook.bearer_token = ENV.fetch('PRUDAI_CHAT_WEBHOOK_BEARER_TOKEN')
 chat_webhook.note = 'Public staff replies to Prudai Support chat; platform-backend owns customer mail.'
 chat_webhook.save!
