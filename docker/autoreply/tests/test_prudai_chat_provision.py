@@ -179,7 +179,9 @@ def test_provisioning_secrets_permissions_and_runtime_contract(repo_root):
     assert 'PRUDAI_CHAT_WEBHOOK_URL:-https://api.prudai.com/support/zammad/webhook' in script
     assert "chat_webhook.bearer_token = ENV.fetch('PRUDAI_CHAT_WEBHOOK_BEARER_TOKEN')" in script
     assert "chat_webhook.ssl_verify = true" in script
-    assert "chat_webhook.customized_payload = false" in script
+    # platform-backend accepteert alleen {ticket_id, article_id} (strict); de standaardpayload gaf 400.
+    assert "chat_webhook.customized_payload = true" in script
+    assert '"ticket_id": "\\#{ticket.id}"' in script and '"article_id": "\\#{article.id}"' in script
     block = script.split("platform_user = User.find_or_initialize_by", 1)[1].split("staff_emails =", 1)[0]
     assert "platform_user.roles = [agent_role]" in block
     assert "platform_user.group_names_access_map = { support_group.name => %w[read create change] }" in block
