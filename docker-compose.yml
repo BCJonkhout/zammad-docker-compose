@@ -159,7 +159,7 @@ services:
       - redis-data:/data
 
   zammad-scheduler:
-    mem_limit: 768m
+    mem_limit: 1536m
     <<: *zammad-service
     command: ["zammad-scheduler"]
 
