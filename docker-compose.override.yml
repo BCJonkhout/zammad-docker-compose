@@ -1,10 +1,10 @@
 ---
 x-prudai-zammad-image: &prudai-zammad-image
-  image: prudai/zammad-support:${VERSION:-7.0.0-0042}
+  image: prudai/zammad-support:${VERSION:-7.2.3}
   build:
     context: ./docker/zammad-assets
     args:
-      BASE_IMAGE: ${IMAGE_REPO:-ghcr.io/zammad/zammad}:${VERSION:-7.0.0-0042}
+      BASE_IMAGE: ${IMAGE_REPO:-ghcr.io/zammad/zammad}:${VERSION:-7.2.3}
 
 services:
   zammad-backup:
@@ -55,7 +55,7 @@ services:
       - ./secrets/prudai-a6715982179f.json:/etc/secrets/prudai-a6715982179f.json:ro
 
   zammad-autoreply:
-    image: prudai/zammad-autoreply:${VERSION:-7.0.0-0042}
+    image: prudai/zammad-autoreply:${VERSION:-7.2.3}
     build:
       context: ./docker/autoreply
     restart: ${RESTART:-always}

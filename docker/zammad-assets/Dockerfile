@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=ghcr.io/zammad/zammad:7.0.0-0042
+ARG BASE_IMAGE=ghcr.io/zammad/zammad:7.2.3
 FROM ${BASE_IMAGE}
 
 USER root
