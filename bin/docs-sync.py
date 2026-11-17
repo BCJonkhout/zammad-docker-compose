@@ -1767,7 +1767,7 @@ def reorder_categories(
                 "PATCH",
                 f"/api/v1/knowledge_bases/{kb_id}/categories/{parent_id}/reorder_categories",
                 expected=(200,),
-                json_body={"ordered_ids": ordered_ids},
+                json_body={"sorting_mode": "manual", "ordered_ids": ordered_ids},
             )
         else:
             current_scope = [state.id for state in categories_by_id.values() if state.parent_id is None]
@@ -1779,7 +1779,7 @@ def reorder_categories(
                 "PATCH",
                 f"/api/v1/knowledge_bases/{kb_id}/categories/reorder_root_categories",
                 expected=(200,),
-                json_body={"ordered_ids": ordered_ids},
+                json_body={"sorting_mode": "manual", "ordered_ids": ordered_ids},
             )
 
 
@@ -1817,7 +1817,7 @@ def reorder_answers(
             "PATCH",
             f"/api/v1/knowledge_bases/{kb_id}/categories/{category_id}/reorder_answers",
             expected=(200,),
-            json_body={"ordered_ids": ordered_ids},
+            json_body={"sorting_mode": "manual", "ordered_ids": ordered_ids},
         )
 
 
