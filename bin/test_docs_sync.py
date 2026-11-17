@@ -1249,3 +1249,53 @@ class IndexFetchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ReorderSortingModeTests(unittest.TestCase):
+    """Zammad 7.2.3 refuses a reorder without `sorting_mode` (422, CATO 6d9622e5)."""
+
+    def setUp(self):
+        self._orig = {name: getattr(ds, name) for name in (
+            "get_kb_snapshot", "get_kb_locale_id", "build_category_state", "build_answer_state")}
+        ds.get_kb_snapshot = lambda client, kb_id: {}
+        ds.get_kb_locale_id = lambda assets, kb_id: 1
+        ds.build_category_state = lambda assets, locale_id, kb_id: (
+            {7: ds.CategoryState(id=7, title="Cat", parent_id=None, translation_id=7)}, {})
+        answers = {11: _answer(11, "b"), 10: _answer(10, "a")}
+        for answer in answers.values():
+            answer.category_id = 7
+        ds.build_answer_state = lambda assets, locale_id, allowed_category_ids=None: (answers, {})
+
+    def tearDown(self):
+        for name, value in self._orig.items():
+            setattr(ds, name, value)
+
+    def test_reorder_answers_sends_manual_sorting_mode(self):
+        bodies = []
+
+        class Client:
+            def request(self, method, path, **kwargs):
+                bodies.append((method, path, kwargs.get("json_body")))
+                return {}
+
+        pages = [
+            ds.PageDef(language="nl", title="A", slug="a", markdown_path="a.md", page_url="u",
+                       category_path=("Cat",), order=1),
+            ds.PageDef(language="nl", title="B", slug="b", markdown_path="b.md", page_url="u",
+                       category_path=("Cat",), order=2),
+        ]
+        answers_by_slug = {"a": _answer(10, "a"), "b": _answer(11, "b")}
+        ds.reorder_answers(Client(), 1, pages, {("Cat",): 7}, answers_by_slug)
+        self.assertEqual(len(bodies), 1)
+        method, path, body = bodies[0]
+        self.assertEqual(method, "PATCH")
+        self.assertTrue(path.endswith("/categories/7/reorder_answers"))
+        self.assertEqual(body, {"sorting_mode": "manual", "ordered_ids": [10, 11]})
+
+    def test_every_reorder_call_in_source_sends_sorting_mode(self):
+        with open(MODULE_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        bodies = re.findall(r'json_body=\{[^}]*"ordered_ids"[^}]*\}', source)
+        self.assertEqual(len(bodies), 3)
+        for body in bodies:
+            self.assertIn('"sorting_mode": "manual"', body)
