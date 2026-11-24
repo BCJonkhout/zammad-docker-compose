@@ -252,6 +252,12 @@ ActiveRecord::Base.transaction do
     'prudai ignore ai escalation notices' => {
       'x-prudai-mail-kind' => { 'operator' => 'contains', 'value' => 'ai-escalation' },
     },
+    # Teammail van de Prudai-chat (platform-backend, sinds 24-11-2026 via M365 als info@, CATO be415a95):
+    # het ticket bestaat al via de API. Natest 24-11: het Graph-kanaal gaf de X-Prudai-Mail-Kind-kop niet door,
+    # dus filter 2 greep niet en de teammail werd een klantartikel. Alleen deze mail heeft "<naam> via Prudai Support".
+    'prudai ignore chat team notices from info' => {
+      'from' => { 'operator' => 'matches regex', 'value' => 'via Prudai Support.*info@prudai\\.com' },
+    },
   }.each do |name, match|
     filter = PostmasterFilter.find_or_initialize_by(name: name)
     filter.channel = 'email'
@@ -261,7 +267,7 @@ ActiveRecord::Base.transaction do
     filter.note = 'Loopbeveiliging e-mailkanaal (bin/provision-email-channel.sh)'
     track("postmaster_filter:#{name}", filter)
   end
-  guard('loop_filters_active', PostmasterFilter.where(channel: 'email', active: true, name: ['prudai ignore mail from own support address', 'prudai ignore ai escalation notices']).count == 2)
+  guard('loop_filters_active', PostmasterFilter.where(channel: 'email', active: true, name: ['prudai ignore mail from own support address', 'prudai ignore ai escalation notices', 'prudai ignore chat team notices from info']).count == 3)
 
   # --- 4. AI autoreply article types (phase 1: not on e-mail) ----------------------------
   AI_TRIGGER_NAMES.each do |name|
