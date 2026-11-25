@@ -254,9 +254,12 @@ ActiveRecord::Base.transaction do
     },
     # Teammail van de Prudai-chat (platform-backend, sinds 24-11-2026 via M365 als info@, CATO be415a95):
     # het ticket bestaat al via de API. Natest 24-11: het Graph-kanaal gaf de X-Prudai-Mail-Kind-kop niet door,
-    # dus filter 2 greep niet en de teammail werd een klantartikel. Alleen deze mail heeft "<naam> via Prudai Support".
+    # dus filter 2 greep niet en de teammail werd een klantartikel. Natest 25-11 (agent-task 6c82): M365 zet de
+    # afzender op "Prudai <info@prudai.com>" (de weergavenaam "<naam> via Prudai Support" overleeft niet), dus:
+    # afzender info@ (geankerd) EN [Ticket#…] in het onderwerp (de teammail draagt altijd het ticketnummer).
     'prudai ignore chat team notices from info' => {
-      'from' => { 'operator' => 'matches regex', 'value' => 'via Prudai Support.*info@prudai\\.com' },
+      'from' => { 'operator' => 'matches regex', 'value' => "(^|[^a-z0-9._%+-])info@prudai\\.com($|[^a-z0-9.-])" },
+      'subject' => { 'operator' => 'matches regex', 'value' => '\\[Ticket#[0-9]+\\]' },
     },
   }.each do |name, match|
     filter = PostmasterFilter.find_or_initialize_by(name: name)
